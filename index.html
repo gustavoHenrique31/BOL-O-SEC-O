@@ -159,8 +159,7 @@
 </header>
 <div class="container"
 
-> 
-  <div class="backend-status" id="backendStatus"
+>   <div class="backend-status" id="backendStatus"
 
 >     <div class="dot" id="backendDot"></div>
     <div>
@@ -170,7 +169,6 @@
 > — aguarde</span>
     </div>
   </div>
-
   <div class="upload-grid"
 
 >     <div class="upload-zone" id="pdfDZ"
@@ -196,21 +194,13 @@
       <input type="file" id="excelInput" accept=".xlsx"/>
     </div>
   </div>
-
-  <div class="info-banner" id="infoBanner"
-
->     <span>🎯</span><div id="infoBannerText"></div>
-  </div>
-
+  <div class="info-banner" id="infoBanner"><span>🎯</span><div id="infoBannerText"></div></div>
   <div class="config-panel"
 
 >     <div class="field"
 
 >       <label>📋 Aba de destino</label>
-      <select id="sheetSelect" onchange="onSheetChange()"
-
->         <option value="">Carregue o Excel</option>
-      </select>
+      <select id="sheetSelect" onchange="onSheetChange()"><option value="">Carregue o Excel</option></select>
     </div>
     <div class="field"
 
@@ -229,7 +219,6 @@
       </select>
     </div>
   </div>
-
   <div class="adv-panel"
 
 >     <h4>⚙️ Opções de Detecção</h4>
@@ -245,12 +234,7 @@
       <div class="toggle-row"><input type="checkbox" id="chkAutoAssign"/><label for="chkAutoAssign">⚡ Auto-distribuir</label></div>
     </div>
   </div>
-
-  <button class="btn-extract" id="btnExtract" disabled onclick="extractImages()"
-
->     🔍 Extrair Imagens do PDF
-  </button>
-
+  <button class="btn-extract" id="btnExtract" disabled onclick="extractImages()">🔍 Extrair Imagens do PDF</button>
   <div class="progress-wrap" id="progressWrap"
 
 >     <div class="prog-top"><span id="progText">Aguardando...</span><span id="progPct">0%</span></div>
@@ -258,13 +242,11 @@
     <div class="sub-bg"><div class="sub-fill" id="subFill"></div></div>
   </div>
   <div class="log-box" id="logBox"></div>
-
   <div class="ok-banner" id="okBanner"
 
 >     <div class="obi">✅</div>
     <div><h4 id="okTitle">Excel gerado!</h4><p id="okDesc"></p></div>
   </div>
-
   <div class="stats-bar" id="statsBar"
 
 >     <div class="stat-chip">📄 Páginas: <span class="sv" id="stPages">0</span></div>
@@ -272,7 +254,6 @@
     <div class="stat-chip">✅ Sel: <span class="sv" id="stSel">0</span></div>
     <div class="stat-chip">❌ Excl: <span class="sv" id="stRej">0</span></div>
   </div>
-
   <div class="assign-panel" id="assignPanel"
 
 >     <div class="assign-header"
@@ -282,10 +263,7 @@
 
 >         <button class="btn-sm btn-outline" onclick="clearAllAssignments()">🗑️ Limpar</button>
         <button class="btn-sm btn-outline" onclick="autoAssignAll()">⚡ Auto</button>
-        <button class="btn-sm btn-green" id="btnExport" disabled onclick="exportExcel()"
-
->           📥 Exportar Excel
-        </button>
+        <button class="btn-sm btn-green" id="btnExport" disabled onclick="exportExcel()">📥 Exportar Excel</button>
       </div>
     </div>
     <div class="col-tabs" id="colTabs"></div>
@@ -293,7 +271,6 @@
     <div class="assign-grid" id="assignGrid"></div>
     <div class="assign-summary" id="assignSummary"></div>
   </div>
-
   <div id="gallerySection" style="display:none"
 
 >     <div class="gallery-header">🖼️ Imagens Extraídas <span class="badge" id="totalBadge">0</span></div>
@@ -309,14 +286,12 @@
     </div>
     <div class="gallery" id="gallery"></div>
   </div>
-
   <div class="empty" id="emptyState"
 
 >     <div class="ei">📂</div>
     <p>Carregue um PDF e um template Excel para começar.</p>
   </div>
 </div>
-
 <div class="modal-bg" id="modalBg"
 
 >   <div class="modal"
@@ -330,23 +305,14 @@
   </div>
 </div>
 <div id="toast"></div>
-
 <script>
-pdfjsLib.GlobalWorkerOptions.workerSrc =
-  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+const $=id=>document.getElementById(id);
+const BACKEND='/api';
+let pdfFile=null,excelFile=null;
+let extractedImages=[],photoColumns=[],assignments={};
+let activeFilter='all',activeAssignCol=null,backendOnline=false;
 
-const $ = id => document.getElementById(id);
-
-// ── CONFIGURAÇÃO DO BACKEND ───────────────────────────────
-// Usa /api relativo — funciona em qualquer domínio
-const BACKEND = '/api';
-
-let pdfFile = null, excelFile = null;
-let extractedImages = [], photoColumns = [], assignments = {};
-let activeFilter = 'all', activeAssignCol = null;
-let backendOnline = false;
-
-// ── UI ────────────────────────────────────────────────────
 function toast(msg,type='info'){const t=$('toast');t.textContent=msg;t.className=`show ${type}`;clearTimeout(t._t);t._t=setTimeout(()=>t.className='',4200)}
 function log(msg,type='info'){const b=$('logBox');b.classList.add('visible');const d=document.createElement('div');d.className=`l${type}`;d.textContent=`[${new Date().toLocaleTimeString()}] ${msg}`;b.appendChild(d);b.scrollTop=b.scrollHeight}
 function setP(pct,lbl){$('progFill').style.width=pct+'%';$('progPct').textContent=pct+'%';$('progText').textContent=lbl}
@@ -356,164 +322,138 @@ function yf(){return new Promise(r=>requestAnimationFrame(()=>setTimeout(r,0)))}
 function showBanner(msg,type='ok'){const b=$('infoBanner');b.className=`info-banner ${type} visible`;$('infoBannerText').innerHTML=msg}
 function hideBanner(){$('infoBanner').classList.remove('visible')}
 
-// ── VERIFICAR BACKEND ─────────────────────────────────────
 async function checkBackend(){
   try{
-    const r = await fetch(BACKEND+'/', {signal: AbortSignal.timeout(5000)});
-    const data = await r.json();
-    if(r.ok && data.status === 'ok'){
-      backendOnline = true;
-      $('backendDot').classList.add('online');
-      $('backendStatusText').textContent = 'Servidor online';
-      $('backendStatusSub').textContent  = ' — pronto para exportar';
-    } else throw new Error();
-  } catch {
-    backendOnline = false;
-    $('backendDot').classList.remove('online');
-    $('backendStatusText').textContent = 'Servidor offline';
-    $('backendStatusSub').textContent  = ' — aguardando conexão';
+    const r=await fetch(BACKEND+'/',{signal:AbortSignal.timeout(5000)});
+    const d=await r.json();
+    if(r.ok&&d.status==='ok'){
+      backendOnline=true;$('backendDot').classList.add('online');
+      $('backendStatusText').textContent='Servidor online';
+      $('backendStatusSub').textContent=' — pronto para exportar';
+    }else throw new Error();
+  }catch{
+    backendOnline=false;$('backendDot').classList.remove('online');
+    $('backendStatusText').textContent='Servidor offline';
+    $('backendStatusSub').textContent=' — aguardando conexão';
   }
 }
-checkBackend();
-setInterval(checkBackend, 15000);
+checkBackend();setInterval(checkBackend,15000);
 
-// ── UPLOADS ───────────────────────────────────────────────
-$('pdfInput').addEventListener('change', function(){
-  if(!this.files[0]) return;
+$('pdfInput').addEventListener('change',function(){
+  if(!this.files[0])return;
   if(!this.files[0].name.toLowerCase().endsWith('.pdf')){toast('⚠️ .pdf apenas','warn');return}
-  pdfFile = this.files[0];
-  $('pdfFN').textContent = '📄 '+pdfFile.name; $('pdfFN').classList.add('visible');
-  checkReady(); toast(`📄 ${pdfFile.name}`,'success');
+  pdfFile=this.files[0];$('pdfFN').textContent='📄 '+pdfFile.name;$('pdfFN').classList.add('visible');
+  checkReady();toast(`📄 ${pdfFile.name}`,'success');
 });
-$('excelInput').addEventListener('change', function(){
-  if(this.files[0]) loadExcelInfo(this.files[0]);
-});
+$('excelInput').addEventListener('change',function(){if(this.files[0])loadExcelInfo(this.files[0])});
 ['pdfDZ','excelDZ'].forEach(id=>{
   const z=$(id);
   z.addEventListener('dragover',e=>{e.preventDefault();e.stopPropagation();z.classList.add('drag-over')});
   z.addEventListener('dragleave',e=>{e.stopPropagation();z.classList.remove('drag-over')});
   z.addEventListener('drop',e=>{
     e.preventDefault();e.stopPropagation();z.classList.remove('drag-over');
-    const f=e.dataTransfer.files[0]; if(!f) return;
+    const f=e.dataTransfer.files[0];if(!f)return;
     if(id==='pdfDZ'){
       if(!f.name.toLowerCase().endsWith('.pdf')){toast('⚠️ .pdf apenas','warn');return}
-      pdfFile=f; $('pdfFN').textContent='📄 '+f.name; $('pdfFN').classList.add('visible');
-      checkReady(); toast(`📄 ${f.name}`,'success');
-    } else {
+      pdfFile=f;$('pdfFN').textContent='📄 '+f.name;$('pdfFN').classList.add('visible');
+      checkReady();toast(`📄 ${f.name}`,'success');
+    }else{
       if(!f.name.toLowerCase().endsWith('.xlsx')){toast('⚠️ .xlsx apenas','warn');return}
       loadExcelInfo(f);
     }
   });
 });
 
-// ── CARREGAR INFO DO EXCEL ────────────────────────────────
 async function loadExcelInfo(f){
-  excelFile = f;
-  $('excelFN').textContent = '📊 '+f.name; $('excelFN').classList.add('visible');
-  checkReady(); toast(`📊 ${f.name}`,'success');
-  if(!backendOnline){showBanner('⚠️ Servidor offline. Aguarde a conexão.','warn');return}
+  excelFile=f;$('excelFN').textContent='📊 '+f.name;$('excelFN').classList.add('visible');
+  checkReady();toast(`📊 ${f.name}`,'success');
+  if(!backendOnline){showBanner('⚠️ Servidor offline.','warn');return}
   try{
-    const fd = new FormData(); fd.append('template', f);
-    const r  = await fetch(BACKEND+'/info-abas', {method:'POST', body:fd});
-    const d  = await r.json();
-    const sel = $('sheetSelect'); sel.innerHTML = '';
+    const fd=new FormData();fd.append('template',f);
+    const r=await fetch(BACKEND+'/info-abas',{method:'POST',body:fd});
+    const d=await r.json();
+    const sel=$('sheetSelect');sel.innerHTML='';
     (d.sheets||[]).forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;sel.appendChild(o)});
     log(`Excel: ${(d.sheets||[]).length} aba(s)`,'ok');
     await loadPhotoColumns();
-  } catch(err){showBanner(`❌ Erro ao ler Excel: ${err.message}`,'err');console.error(err)}
+  }catch(err){showBanner(`❌ Erro ao ler Excel: ${err.message}`,'err')}
 }
-async function onSheetChange(){ await loadPhotoColumns(); }
-
+async function onSheetChange(){await loadPhotoColumns()}
 async function loadPhotoColumns(){
-  const sheetName  = $('sheetSelect').value;
-  const headerRow  = parseInt($('headerRowInput').value)||1;
-  hideBanner(); photoColumns=[]; assignments={};
-  if(!excelFile||!sheetName) return;
+  const sn=$('sheetSelect').value,hr=parseInt($('headerRowInput').value)||1;
+  hideBanner();photoColumns=[];assignments={};
+  if(!excelFile||!sn)return;
   if(!backendOnline){showBanner('⚠️ Servidor offline.','warn');return}
   try{
-    const fd = new FormData();
-    fd.append('template',    excelFile);
-    fd.append('sheet_name',  sheetName);
-    fd.append('header_row',  String(headerRow));
-    const r = await fetch(BACKEND+'/info-colunas', {method:'POST', body:fd});
-    const d = await r.json();
+    const fd=new FormData();fd.append('template',excelFile);fd.append('sheet_name',sn);fd.append('header_row',String(hr));
+    const r=await fetch(BACKEND+'/info-colunas',{method:'POST',body:fd});
+    const d=await r.json();
     if(d.error){showBanner(`❌ ${d.error}`,'err');return}
-    photoColumns = (d.columns||[]).map(c=>({name:c.name, colNum:c.col, letter:idxToCol(c.col)}));
+    photoColumns=(d.columns||[]).map(c=>({name:c.name,colNum:c.col,letter:idxToCol(c.col)}));
     photoColumns.forEach(c=>{assignments[c.colNum]=[]});
     if(!photoColumns.length){showBanner('⚠️ Nenhuma coluna Foto_X detectada.','warn');return}
-    const preview = photoColumns.slice(0,6).map(c=>`<strong>${c.name}</strong>(${c.letter})`).join(' ');
-    const more    = photoColumns.length>6?` +${photoColumns.length-6}` : '';
+    const preview=photoColumns.slice(0,6).map(c=>`<strong>${c.name}</strong>(${c.letter})`).join(' ');
+    const more=photoColumns.length>6?` +${photoColumns.length-6}`:'';
     showBanner(`✅ <strong>${photoColumns.length}</strong> coluna(s): ${preview}${more}`,'ok');
     log(`Colunas: ${photoColumns.map(c=>c.name).join(', ')}`,'ok');
-    if(extractedImages.length>0) buildAssignPanel();
-  } catch(err){showBanner(`❌ ${err.message}`,'err');log('ERRO: '+err.message,'err')}
+    if(extractedImages.length>0)buildAssignPanel();
+  }catch(err){showBanner(`❌ ${err.message}`,'err')}
 }
+function checkReady(){$('btnExtract').disabled=!(pdfFile&&excelFile)}
 
-function checkReady(){ $('btnExtract').disabled=!(pdfFile&&excelFile); }
-
-// ── EXTRAÇÃO PDF ──────────────────────────────────────────
 async function extractImages(){
-  if(!pdfFile) return;
-  extractedImages=[]; assignments={};
-  photoColumns.forEach(c=>{assignments[c.colNum]=[]});
-  $('gallery').innerHTML=''; $('logBox').innerHTML=''; $('logBox').classList.remove('visible');
-  $('gallerySection').style.display='none'; $('assignPanel').classList.remove('visible');
-  $('emptyState').style.display='none'; $('statsBar').classList.remove('visible');
-  $('okBanner').classList.remove('visible'); $('pageFilters').innerHTML=''; activeFilter='all';
-  const pw=$('progressWrap'); pw.classList.add('visible'); setP(0,'Carregando PDF...'); setSub(0);
-  const scale    = parseFloat($('scaleSelect').value)||1.5;
-  const minSize  = parseInt($('minSize').value)||40;
-  const overlapT = parseInt($('overlapThresh').value)||85;
-  const jpegQ    = (parseInt($('jpegQ').value)||92)/100;
-  const cropPad  = parseInt($('cropPad').value)||3;
-  const doDedup  = $('chkDedup').checked;
-  const doFallback = $('chkFallback').checked;
+  if(!pdfFile)return;
+  extractedImages=[];assignments={};photoColumns.forEach(c=>{assignments[c.colNum]=[]});
+  $('gallery').innerHTML='';$('logBox').innerHTML='';$('logBox').classList.remove('visible');
+  $('gallerySection').style.display='none';$('assignPanel').classList.remove('visible');
+  $('emptyState').style.display='none';$('statsBar').classList.remove('visible');
+  $('okBanner').classList.remove('visible');$('pageFilters').innerHTML='';activeFilter='all';
+  const pw=$('progressWrap');pw.classList.add('visible');setP(0,'Carregando PDF...');setSub(0);
+  const scale=parseFloat($('scaleSelect').value)||1.5;
+  const minSize=parseInt($('minSize').value)||40;
+  const overlapT=parseInt($('overlapThresh').value)||85;
+  const jpegQ=(parseInt($('jpegQ').value)||92)/100;
+  const cropPad=parseInt($('cropPad').value)||3;
+  const doDedup=$('chkDedup').checked;
+  const doFallback=$('chkFallback').checked;
   try{
-    const buf = await pdfFile.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({data:buf}).promise;
-    const total = pdf.numPages; log(`PDF: ${total} páginas`,'ok');
+    const buf=await pdfFile.arrayBuffer();
+    const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+    const total=pdf.numPages;log(`PDF: ${total} páginas`,'ok');
     for(let p=1;p<=total;p++){
-      setP(Math.round(((p-1)/total)*95),`Página ${p}/${total}...`); setSub(0); await yf();
-      const page = await pdf.getPage(p);
-      const vp   = page.getViewport({scale});
-      const canvas = document.createElement('canvas');
-      canvas.width  = Math.round(vp.width);
-      canvas.height = Math.round(vp.height);
+      setP(Math.round(((p-1)/total)*95),`Página ${p}/${total}...`);setSub(0);await yf();
+      const page=await pdf.getPage(p);
+      const vp=page.getViewport({scale});
+      const canvas=document.createElement('canvas');
+      canvas.width=Math.round(vp.width);canvas.height=Math.round(vp.height);
       await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
       setSub(40);
-      const ops    = await page.getOperatorList();
-      const regions = detectRegions(ops,page,vp);
-      const unique  = doDedup?dedup(regions,overlapT/100):regions;
-      setSub(70); let cnt=0;
+      const ops=await page.getOperatorList();
+      const regions=detectRegions(ops,page,vp);
+      const unique=doDedup?dedup(regions,overlapT/100):regions;
+      setSub(70);let cnt=0;
       for(const reg of unique){
-        const x0=Math.max(0,Math.round(reg.x)-cropPad), y0=Math.max(0,Math.round(reg.y)-cropPad);
+        const x0=Math.max(0,Math.round(reg.x)-cropPad),y0=Math.max(0,Math.round(reg.y)-cropPad);
         const x1=Math.min(canvas.width,Math.round(reg.x+reg.w)+cropPad);
         const y1=Math.min(canvas.height,Math.round(reg.y+reg.h)+cropPad);
-        const cw=x1-x0, ch=y1-y0;
-        if(cw<minSize||ch<minSize) continue;
-        const crop = document.createElement('canvas'); crop.width=cw; crop.height=ch;
+        const cw=x1-x0,ch=y1-y0;if(cw<minSize||ch<minSize)continue;
+        const crop=document.createElement('canvas');crop.width=cw;crop.height=ch;
         crop.getContext('2d').drawImage(canvas,x0,y0,cw,ch,0,0,cw,ch);
-        cnt++;
-        extractedImages.push({dataUrl:crop.toDataURL('image/jpeg',jpegQ),w:cw,h:ch,page:p,seq:cnt,idx:extractedImages.length,selected:true});
+        cnt++;extractedImages.push({dataUrl:crop.toDataURL('image/jpeg',jpegQ),w:cw,h:ch,page:p,seq:cnt,idx:extractedImages.length,selected:true});
       }
       if(cnt===0&&doFallback){
         log(`P${p}: fallback`,'warn');
-        extractedImages.push({dataUrl:canvas.toDataURL('image/jpeg',jpegQ),w:canvas.width,h:canvas.height,page:p,seq:1,idx:extractedImages.length,selected:true});
-        cnt=1;
+        extractedImages.push({dataUrl:canvas.toDataURL('image/jpeg',jpegQ),w:canvas.width,h:canvas.height,page:p,seq:1,idx:extractedImages.length,selected:true});cnt=1;
       }
-      setSub(100); log(`P${p}: ${cnt} foto(s)`,'ok');
+      setSub(100);log(`P${p}: ${cnt} foto(s)`,'ok');
     }
-    setP(100,'Concluído!'); setTimeout(()=>pw.classList.remove('visible'),900);
+    setP(100,'Concluído!');setTimeout(()=>pw.classList.remove('visible'),900);
     if(!extractedImages.length){toast('⚠️ Nenhuma imagem.','warn');$('emptyState').style.display='block';return}
-    extractedImages=cleanImages(extractedImages); extractedImages.forEach((img,i)=>img.idx=i);
+    extractedImages=cleanImages(extractedImages);extractedImages.forEach((img,i)=>img.idx=i);
     if(!extractedImages.length){toast('⚠️ Todas removidas.','warn');$('emptyState').style.display='block';return}
-    if($('chkAutoAssign').checked&&photoColumns.length>0) autoAssignAll();
-    buildGallery(); buildAssignPanel();
-    toast(`✅ ${extractedImages.length} imagens!`,'success');
-  } catch(err){
-    pw.classList.remove('visible');
-    toast('❌ '+err.message,'error'); log('ERRO: '+err.message,'err'); console.error(err);
-  }
+    if($('chkAutoAssign').checked&&photoColumns.length>0)autoAssignAll();
+    buildGallery();buildAssignPanel();toast(`✅ ${extractedImages.length} imagens!`,'success');
+  }catch(err){pw.classList.remove('visible');toast('❌ '+err.message,'error');log('ERRO: '+err.message,'err');console.error(err)}
 }
 
 function detectRegions(ops,page,vp){
@@ -526,8 +466,7 @@ function detectRegions(ops,page,vp){
       case OPS.transform:ctm=mm(ctm,args);break;
       case OPS.paintFormXObjectBegin:stack.push([...ctm]);if(args&&args[1])ctm=mm(ctm,args[1]);break;
       case OPS.paintFormXObjectEnd:if(stack.length)ctm=stack.pop();break;
-      case OPS.paintImageXObject:case OPS.paintJpegXObject:case OPS.paintImageMaskXObject:
-        regions.push(bbox(ctm,page,vp));break;
+      case OPS.paintImageXObject:case OPS.paintJpegXObject:case OPS.paintImageMaskXObject:regions.push(bbox(ctm,page,vp));break;
     }
   }
   return regions;
@@ -544,31 +483,29 @@ function mm(a,b){return[a[0]*b[0]+a[2]*b[1],a[1]*b[0]+a[3]*b[1],a[0]*b[2]+a[2]*b
 function dedup(r,t){const k=[];for(const x of r){if(!k.some(y=>iou(y,x)>=t))k.push(x)}return k}
 function iou(a,b){const x0=Math.max(a.x,b.x),y0=Math.max(a.y,b.y),x1=Math.min(a.x+a.w,b.x+b.w),y1=Math.min(a.y+a.h,b.y+b.h);const i=Math.max(0,x1-x0)*Math.max(0,y1-y0);if(!i)return 0;return i/(a.w*a.h+b.w*b.h-i)}
 function cleanImages(images){
-  if(!$('chkClean').checked) return images;
+  if(!$('chkClean').checked)return images;
   const areas=images.map(i=>i.w*i.h).sort((a,b)=>a-b);
   const med=areas[Math.floor(areas.length/2)]||0;
-  const minA=Math.max(6000,med*0.15); const out=[];
+  const minA=Math.max(6000,med*0.15);const out=[];
   for(const img of images){const a=img.w*img.h,r=img.w/img.h;if(img.w<80||img.h<80||a<minA||r>6||r<0.16)continue;out.push(img)}
-  const rm=images.length-out.length; if(rm>0) log(`Filtro: ${rm} removido(s)`,'warn');
+  const rm=images.length-out.length;if(rm>0)log(`Filtro: ${rm} removido(s)`,'warn');
   return out;
 }
 
-// ── PAINEL ATRIBUIÇÃO ─────────────────────────────────────
 function buildAssignPanel(){
-  if(!photoColumns.length) return;
-  $('assignPanel').classList.add('visible'); buildColTabs();
-  if(!activeAssignCol||!photoColumns.find(c=>c.colNum===activeAssignCol))
-    activeAssignCol=photoColumns[0].colNum;
-  renderAssignGrid(); updateAssignSummary();
+  if(!photoColumns.length)return;
+  $('assignPanel').classList.add('visible');buildColTabs();
+  if(!activeAssignCol||!photoColumns.find(c=>c.colNum===activeAssignCol))activeAssignCol=photoColumns[0].colNum;
+  renderAssignGrid();updateAssignSummary();
 }
 function buildColTabs(){
-  const tabs=$('colTabs'); tabs.innerHTML='';
+  const tabs=$('colTabs');tabs.innerHTML='';
   photoColumns.forEach(col=>{
     const cnt=(assignments[col.colNum]||[]).length;
     const btn=document.createElement('button');
     btn.className='col-tab'+(col.colNum===activeAssignCol?' active':'')+(cnt>0?' has-photos':'');
-    btn.textContent=`${col.name}(${cnt})`; btn.dataset.cn=col.colNum;
-    btn.onclick=()=>selectAssignCol(col.colNum); tabs.appendChild(btn);
+    btn.textContent=`${col.name}(${cnt})`;btn.dataset.cn=col.colNum;
+    btn.onclick=()=>selectAssignCol(col.colNum);tabs.appendChild(btn);
   });
 }
 function selectAssignCol(colNum){
@@ -579,13 +516,13 @@ function selectAssignCol(colNum){
   renderAssignGrid();
 }
 function renderAssignGrid(){
-  const grid=$('assignGrid'); grid.innerHTML='';
+  const grid=$('assignGrid');grid.innerHTML='';
   const selImgs=extractedImages.filter(i=>i.selected);
   if(!selImgs.length){grid.innerHTML='<div style="color:#475569;font-size:.8rem;grid-column:1/-1;padding:16px">Selecione imagens na galeria</div>';return}
   selImgs.forEach(img=>{
     const ac=findAssignedCol(img.idx);
     const card=document.createElement('div');
-    card.className='assign-card'+(ac!==null?' assigned':''); card.dataset.idx=img.idx;
+    card.className='assign-card'+(ac!==null?' assigned':'');card.dataset.idx=img.idx;
     const cd=ac!==null?photoColumns.find(c=>c.colNum===ac):null;
     const pos=cd?(assignments[cd.colNum].indexOf(img.idx)+1):0;
     card.innerHTML=`<div class="ac-thumb"><img src="${img.dataUrl}" loading="lazy"/></div>`+
@@ -593,7 +530,7 @@ function renderAssignGrid(){
 
 > ${cd?cd.name:''}${pos>0?` #${pos}`:''}</div>`+
       `<div class="ac-foot"><span class="ac-idx">#${img.idx+1}</span><span class="ac-pg">P${img.page}</span></div>`;
-    card.onclick=()=>toggleAssign(img.idx); grid.appendChild(card);
+    card.onclick=()=>toggleAssign(img.idx);grid.appendChild(card);
   });
 }
 function colColor(colNum){const c=['#6366f1','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#84cc16','#f97316'];return c[photoColumns.findIndex(x=>x.colNum===colNum)%c.length]||'#6366f1'}
@@ -602,10 +539,10 @@ function toggleAssign(imgIdx){
   const cur=findAssignedCol(imgIdx);
   if(cur===activeAssignCol){assignments[activeAssignCol]=assignments[activeAssignCol].filter(i=>i!==imgIdx)}
   else{if(cur!==null)assignments[cur]=assignments[cur].filter(i=>i!==imgIdx);assignments[activeAssignCol]=[...(assignments[activeAssignCol]||[]),imgIdx]}
-  buildColTabs(); renderAssignGrid(); updateAssignSummary(); updateExportBtn();
+  buildColTabs();renderAssignGrid();updateAssignSummary();updateExportBtn();
 }
 function updateAssignSummary(){
-  const sum=$('assignSummary'); sum.innerHTML=''; let total=0;
+  const sum=$('assignSummary');sum.innerHTML='';let total=0;
   photoColumns.forEach(col=>{const cnt=(assignments[col.colNum]||[]).length;total+=cnt;const chip=document.createElement('div');chip.className='sum-chip';chip.innerHTML=`<strong style="color:${colColor(col.colNum)}">${col.name}</strong>: ${cnt}`;sum.appendChild(chip)});
   const ua=extractedImages.filter(x=>x.selected).length-total;
   if(ua>0){const chip=document.createElement('div');chip.className='sum-chip';chip.style.borderColor='#f59e0b';chip.innerHTML=`⚠️ <strong style="color:#f59e0b">${ua}</strong> não atribuída(s)`;sum.appendChild(chip)}
@@ -615,23 +552,22 @@ function clearAllAssignments(){photoColumns.forEach(c=>{assignments[c.colNum]=[]
 function autoAssignAll(){
   if(!photoColumns.length){toast('⚠️ Sem colunas.','warn');return}
   photoColumns.forEach(c=>{assignments[c.colNum]=[]});
-  const si=extractedImages.filter(i=>i.selected); const nc=photoColumns.length;
+  const si=extractedImages.filter(i=>i.selected);const nc=photoColumns.length;
   si.forEach((img,i)=>{assignments[photoColumns[i%nc].colNum].push(img.idx)});
-  buildColTabs(); renderAssignGrid(); updateAssignSummary(); updateExportBtn();
+  buildColTabs();renderAssignGrid();updateAssignSummary();updateExportBtn();
   toast(`⚡ ${si.length} distribuídas!`,'success');
 }
 
-// ── GALERIA ───────────────────────────────────────────────
 function buildGallery(){
-  const g=$('gallery'); g.innerHTML=''; buildFilters();
+  const g=$('gallery');g.innerHTML='';buildFilters();
   extractedImages.forEach((img,i)=>addCard(img,i,g));
   $('gallerySection').style.display='block';
-  $('totalBadge').textContent=extractedImages.length; $('totalCount').textContent=extractedImages.length;
-  updateStats(); applyFilter('all');
+  $('totalBadge').textContent=extractedImages.length;$('totalCount').textContent=extractedImages.length;
+  updateStats();applyFilter('all');
 }
 function addCard(img,i,g){
   const c=document.createElement('div');
-  c.className=`img-card ${img.selected?'selected':'rejected'}`; c.dataset.idx=i; c.dataset.page=img.page;
+  c.className=`img-card ${img.selected?'selected':'rejected'}`;c.dataset.idx=i;c.dataset.page=img.page;
   c.innerHTML=`<div class="thumb"><img src="${img.dataUrl}" loading="lazy"/><div class="chk">${img.selected?'✓':'✕'}</div>`+
     `<div class="sq-badge">${img.seq}ª</div><div class="pg-badge">Pág. ${img.page}</div></div>`+
     `<div class="card-foot"><span class="ci">#${i+1}</span><span class="cs">${img.w}×${img.h}</span></div>`+
@@ -643,7 +579,7 @@ function addCard(img,i,g){
 }
 function buildFilters(){
   const pages=[...new Set(extractedImages.map(x=>x.page))].sort((a,b)=>a-b);
-  const pf=$('pageFilters'); pf.innerHTML='';
+  const pf=$('pageFilters');pf.innerHTML='';
   mkBtn('all',`Todas(${extractedImages.length})`,pf);
   pages.forEach(p=>mkBtn(p,`P${p}(${extractedImages.filter(x=>x.page===p).length})`,pf));
 }
@@ -655,110 +591,85 @@ function toggle(i){extractedImages[i].selected=!extractedImages[i].selected;refr
 function setState(i,v){
   extractedImages[i].selected=v;
   if(!v){photoColumns.forEach(c=>{assignments[c.colNum]=(assignments[c.colNum]||[]).filter(x=>x!==i)});buildColTabs();updateAssignSummary();updateExportBtn()}
-  refresh(i); updateStats();
-  if($('assignPanel').classList.contains('visible')) renderAssignGrid();
+  refresh(i);updateStats();
+  if($('assignPanel').classList.contains('visible'))renderAssignGrid();
 }
 function refresh(i){const c=document.querySelector(`.img-card[data-idx="${i}"]`);if(!c)return;const img=extractedImages[i];c.className=`img-card ${img.selected?'selected':'rejected'}`;c.querySelector('.chk').textContent=img.selected?'✓':'✕'}
 function updateStats(){
   const sel=extractedImages.filter(x=>x.selected).length;
-  $('selCount').textContent=sel; $('stPages').textContent=new Set(extractedImages.map(x=>x.page)).size;
-  $('stImgs').textContent=extractedImages.length; $('stSel').textContent=sel;
-  $('stRej').textContent=extractedImages.length-sel; $('statsBar').classList.add('visible');
+  $('selCount').textContent=sel;$('stPages').textContent=new Set(extractedImages.map(x=>x.page)).size;
+  $('stImgs').textContent=extractedImages.length;$('stSel').textContent=sel;
+  $('stRej').textContent=extractedImages.length-sel;$('statsBar').classList.add('visible');
 }
 
-// ── EXPORTAR EXCEL VIA BACKEND ────────────────────────────
 async function exportExcel(){
   const totalA=Object.values(assignments).reduce((s,a)=>s+a.length,0);
   if(!totalA){toast('⚠️ Atribua fotos.','warn');return}
   if(!excelFile){toast('⚠️ Carregue o template.','warn');return}
   if(!backendOnline){toast('❌ Servidor offline.','error');return}
-  const sheetName = $('sheetSelect').value;
-  const headerRow = parseInt($('headerRowInput').value)||1;
+  const sheetName=$('sheetSelect').value;
+  const headerRow=parseInt($('headerRowInput').value)||1;
   if(!sheetName){toast('⚠️ Escolha a aba.','warn');return}
-
-  const modal=$('modalBg'); modal.classList.add('visible');
-  $('mIcon').textContent='⚙️'; $('mTitle').textContent='Enviando para o servidor';
+  const modal=$('modalBg');modal.classList.add('visible');
+  $('mIcon').textContent='⚙️';$('mTitle').textContent='Enviando para o servidor';
   $('mSub').textContent=`${totalA} fotos → Python/openpyxl`;
-  setM(0,'Preparando imagens...',''); await yf();
-
+  setM(0,'Preparando imagens...','');await yf();
   try{
-    const formData = new FormData();
-    formData.append('template',   excelFile);
-    formData.append('sheet_name', sheetName);
-    formData.append('header_row', String(headerRow));
-
-    // Coletar todos os índices únicos com nome ÚNICO por índice
-    const allAssigned = [...new Set(Object.values(assignments).flat())];
-    const assignByName = {};
-
-    for(let k=0; k<allAssigned.length; k++){
-      const imgIdx = allAssigned[k];
-      const img    = extractedImages[imgIdx];
-      const fname  = `foto_${imgIdx}.jpg`;      // nome único baseado no índice
-      const blob   = dataUrlToBlob(img.dataUrl);
-      formData.append('images', blob, fname);   // cada imagem com campo 'images'
+    const formData=new FormData();
+    formData.append('template',excelFile);
+    formData.append('sheet_name',sheetName);
+    formData.append('header_row',String(headerRow));
+    const allAssigned=[...new Set(Object.values(assignments).flat())];
+    const assignByName={};
+    for(let k=0;k<allAssigned.length;k++){
+      const imgIdx=allAssigned[k];
+      const img=extractedImages[imgIdx];
+      const fname=`foto_${imgIdx}.jpg`;
+      const blob=dataUrlToBlob(img.dataUrl);
+      formData.append('images',blob,fname);
       setM(Math.round((k/allAssigned.length)*30),`Preparando ${k+1}/${allAssigned.length}`,`${k+1}/${allAssigned.length}`);
-      if(k%5===0) await yf();
+      if(k%5===0)await yf();
     }
-
-    // Montar assignments por nome da coluna
     for(const col of photoColumns){
-      const assigned = assignments[col.colNum]||[];
-      if(assigned.length>0){
-        assignByName[col.name] = assigned.map(idx=>`foto_${idx}.jpg`);
-      }
+      const assigned=assignments[col.colNum]||[];
+      if(assigned.length>0)assignByName[col.name]=assigned.map(idx=>`foto_${idx}.jpg`);
     }
-
-    formData.append('assignments', JSON.stringify(assignByName));
+    formData.append('assignments',JSON.stringify(assignByName));
     log(`Enviando ${allAssigned.length} imagens...`,'info');
-    setM(35,'Enviando para o servidor...',''); await yf();
-
-    const response = await fetch(BACKEND+'/gerar-excel', {method:'POST', body:formData});
-
-    setM(90,'Recebendo arquivo...',''); await yf();
-
-    const contentType = response.headers.get('content-type')||'';
-    if(contentType.includes('json')){
-      const err = await response.json();
-      throw new Error(err.error||`Erro HTTP ${response.status}`);
-    }
-    if(!response.ok) throw new Error(`Erro HTTP ${response.status}`);
-
-    const blob = await response.blob();
+    setM(35,'Enviando para o servidor...','');await yf();
+    const response=await fetch(BACKEND+'/gerar-excel',{method:'POST',body:formData});
+    setM(90,'Recebendo arquivo...','');await yf();
+    const contentType=response.headers.get('content-type')||'';
+    if(contentType.includes('json')){const err=await response.json();throw new Error(err.error||`Erro HTTP ${response.status}`)}
+    if(!response.ok)throw new Error(`Erro HTTP ${response.status}`);
+    const blob=await response.blob();
     setM(100,'Concluído!',`${totalA} fotos`);
-    $('mIcon').textContent='✅'; $('mTitle').textContent='Excel Gerado!';
-    await yf(); setTimeout(()=>modal.classList.remove('visible'),1300);
-
-    const url = URL.createObjectURL(blob);
-    const a   = document.createElement('a');
-    a.href    = url;
-    a.download = (excelFile.name.replace(/\.xlsx$/i,'')||'template')+'_com_fotos.xlsx';
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    $('mIcon').textContent='✅';$('mTitle').textContent='Excel Gerado!';
+    await yf();setTimeout(()=>modal.classList.remove('visible'),1300);
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url;a.download=(excelFile.name.replace(/\.xlsx$/i,'')||'template')+'_com_fotos.xlsx';
+    document.body.appendChild(a);a.click();document.body.removeChild(a);
     setTimeout(()=>URL.revokeObjectURL(url),8000);
-
-    $('okTitle').textContent = `✅ ${totalA} fotos inseridas!`;
-    $('okDesc').textContent  = `Aba "${sheetName}" • Template 100% preservado`;
+    $('okTitle').textContent=`✅ ${totalA} fotos inseridas!`;
+    $('okDesc').textContent=`Aba "${sheetName}" • Template 100% preservado`;
     $('okBanner').classList.add('visible');
     toast(`✅ ${totalA} fotos no Excel!`,'success');
     log(`OK: ${totalA} fotos → "${sheetName}"`,'ok');
-
-  } catch(err){
+  }catch(err){
     modal.classList.remove('visible');
-    toast('❌ '+err.message,'error'); log('ERRO: '+err.message,'err'); console.error(err);
+    toast('❌ '+err.message,'error');log('ERRO: '+err.message,'err');console.error(err);
   }
 }
 
-// ── UTILITÁRIOS ───────────────────────────────────────────
 function dataUrlToBlob(dataUrl){
   const parts=dataUrl.split(',');
   const mime=parts[0].match(/:(.*?);/)[1];
-  const bin=atob(parts[1]); const arr=new Uint8Array(bin.length);
-  for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
+  const bin=atob(parts[1]);const arr=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);
   return new Blob([arr],{type:mime});
 }
-function idxToCol(num){
-  let c=''; while(num>0){const m=(num-1)%26;c=String.fromCharCode(65+m)+c;num=Math.floor((num-m)/26);}return c;
-}
+function idxToCol(num){let c='';while(num>0){const m=(num-1)%26;c=String.fromCharCode(65+m)+c;num=Math.floor((num-m)/26)}return c}
 </script>
 </body>
 </html>
