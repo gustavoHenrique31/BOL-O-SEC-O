@@ -1,5 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from openpyxl import load_workbook
@@ -26,9 +26,6 @@ def find_photo_columns(ws, header_row=1):
     cols = []
     row  = ws[header_row]
 
-    
-
-# 1. Foto_X explícito
     for cell in row:
         if cell.value and norm(cell.value).startswith('foto_'):
             try:
@@ -41,9 +38,6 @@ def find_photo_columns(ws, header_row=1):
         cols.sort(key=lambda x: x['col'])
         return cols
 
-    
-
-# 2. Tudo após "Tipo de Quantitativo"
     anchor = None
     for cell in row:
         if 'tipo de quantitativo' in norm(cell.value or ''):
@@ -58,17 +52,30 @@ def find_photo_columns(ws, header_row=1):
     return cols
 
 
-# ── Endpoints API ─────────────────────────────────────────
-@app.get("/api/")
+# ── Rota raiz — redireciona para o frontend ───────────────
+@app.get("/")
 def root():
+    index_path = os.path.join("static", "index.html")
+    if os.path.exists(index_path):
+        with open(index_path, "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    return JSONResponse({"status": "ok", "message": "API online"})
+
+
+# ── API ───────────────────────────────────────────────────
+@app.get("/api/")
+def api_root():
     return {"status": "ok", "message": "PDF → Fotos Excel API"}
 
 
 @app.post("/api/info-abas")
 async def info_abas(template: UploadFile = File(...)):
-    data = await template.read()
-    wb   = load_workbook(io.BytesIO(data), read_only=True)
-    return {"sheets": wb.sheetnames}
+    try:
+        data = await template.read()
+        wb   = load_workbook(io.BytesIO(data), read_only=True)
+        return {"sheets": wb.sheetnames}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.post("/api/info-colunas")
@@ -77,13 +84,16 @@ async def info_colunas(
     sheet_name: str        = Form(...),
     header_row: int        = Form(1)
 ):
-    data = await template.read()
-    wb   = load_workbook(io.BytesIO(data))
-    if sheet_name not in wb.sheetnames:
-        return {"error": f"Aba '{sheet_name}' não encontrada", "columns": []}
-    ws   = wb[sheet_name]
-    cols = find_photo_columns(ws, header_row)
-    return {"columns": cols}
+    try:
+        data = await template.read()
+        wb   = load_workbook(io.BytesIO(data))
+        if sheet_name not in wb.sheetnames:
+            return {"error": f"Aba '{sheet_name}' não encontrada", "columns": []}
+        ws   = wb[sheet_name]
+        cols = find_photo_columns(ws, header_row)
+        return {"columns": cols}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.post("/api/gerar-excel")
@@ -153,7 +163,7 @@ async def gerar_excel(
 
                 
 
-# Redimensionar preservando aspect ratio
+# Redimensionar
                 pil = PILImage.open(img_path)
                 pil.thumbnail((300, 200), PILImage.LANCZOS)
                 resized = os.path.join(tmp, f"r_{uuid.uuid4().hex}.jpg")
@@ -161,16 +171,16 @@ async def gerar_excel(
 
                 
 
-# Ajustar altura da linha
+# Altura da linha
                 _, h_px = pil.size
                 ws.row_dimensions[row_num].height = max(h_px * 0.75 + 4, 20)
 
                 
 
 # Inserir imagem
-                cell_ref         = ws.cell(row=row_num, column=col_num).coordinate
-                xl_img           = XLImage(resized)
-                xl_img.anchor    = cell_ref
+                cell_ref      = ws.cell(row=row_num, column=col_num).coordinate
+                xl_img        = XLImage(resized)
+                xl_img.anchor = cell_ref
                 ws.add_image(xl_img)
 
                 print(f"[DEBUG] Inserido: {fname} → {col_name} linha {row_num}")
@@ -191,6 +201,5 @@ async def gerar_excel(
         return JSONResponse({"error": str(e), "trace": tb}, status_code=500)
 
 
-# ── Servir frontend estático ──────────────────────────────
-# DEVE ser a última linha — depois de todos os endpoints /api/
+# ── Frontend estático — DEVE ser a última linha ───────────
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
