@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
 from PIL import Image as PILImage
-import tempfile, json, os, uuid, io
+import tempfile, json, os, uuid, io, shutil
 from typing import List
 
 app = FastAPI()
@@ -16,8 +16,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── HTML do frontend embutido ─────────────────────────────
-HTML = """<!DOCTYPE html>
+HTML = r"""<!DOCTYPE html>
 <html lang="pt-BR"
 
 > <head>
@@ -55,7 +54,7 @@ HTML = """<!DOCTYPE html>
     .field input,.field select{width:100%;background:#0f1117;border:1.5px solid #3b4262;border-radius:8px;padding:8px 11px;color:#e2e8f0;font-size:.86rem;outline:none;transition:border-color .2s}
     .field input:focus,.field select:focus{border-color:#6366f1}
     .adv-panel{background:#1a1d2e;border:1px solid #2d3155;border-radius:12px;padding:16px 18px;margin-bottom:18px}
-    .adv-panel h4{font-size:.76rem;font-weight:700;color:#a5b4fc;text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+    .adv-panel h4{font-size:.76rem;font-weight:700;color:#a5b4fc;text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px}
     .adv-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
     @media(max-width:900px){.adv-grid{grid-template-columns:1fr 1fr}}
     .toggle-row{display:flex;align-items:center;gap:9px;background:#0f1117;border-radius:8px;padding:8px 11px;border:1px solid #2d3155}
@@ -171,72 +170,36 @@ HTML = """<!DOCTYPE html>
 <body>
 <header>
   <div class="logo">🖼️</div>
-  <div>
-    <h1>PDF → Fotos Excel</h1>
-    <p>Extraia imagens do PDF e insira nas colunas Foto_X do template</p>
-  </div>
+  <div><h1>PDF → Fotos Excel</h1><p>Extraia imagens do PDF e insira nas colunas Foto_X do template</p></div>
 </header>
 <div class="container"
 
 >   <div class="backend-status" id="backendStatus"
 
 >     <div class="dot" id="backendDot"></div>
-    <div>
-      <strong id="backendStatusText">Verificando servidor...</strong>
-      <span id="backendStatusSub"
+    <div><strong id="backendStatusText">Verificando servidor...</strong><span id="backendStatusSub"
 
-> — aguarde</span>
-    </div>
+> — aguarde</span></div>
   </div>
   <div class="upload-grid"
 
 >     <div class="upload-zone" id="pdfDZ"
 
->       <label for="pdfInput"
-
->         <div class="uz-icon">📄</div>
-        <h2>Clique ou arraste o PDF</h2>
-        <p>Imagens extraídas automaticamente</p>
-        <div class="fn" id="pdfFN"></div>
-      </label>
+>       <label for="pdfInput"><div class="uz-icon">📄</div><h2>Clique ou arraste o PDF</h2><p>Imagens extraídas automaticamente</p><div class="fn" id="pdfFN"></div></label>
       <input type="file" id="pdfInput" accept=".pdf"/>
     </div>
     <div class="upload-zone" id="excelDZ"
 
->       <label for="excelInput"
-
->         <div class="uz-icon">📊</div>
-        <h2>Clique ou arraste o template Excel</h2>
-        <p>Detecta colunas Foto_X automaticamente</p>
-        <div class="fn" id="excelFN"></div>
-      </label>
+>       <label for="excelInput"><div class="uz-icon">📊</div><h2>Clique ou arraste o template Excel</h2><p>Detecta colunas Foto_X automaticamente</p><div class="fn" id="excelFN"></div></label>
       <input type="file" id="excelInput" accept=".xlsx"/>
     </div>
   </div>
   <div class="info-banner" id="infoBanner"><span>🎯</span><div id="infoBannerText"></div></div>
   <div class="config-panel"
 
->     <div class="field"
-
->       <label>📋 Aba de destino</label>
-      <select id="sheetSelect" onchange="onSheetChange()"><option value="">Carregue o Excel</option></select>
-    </div>
-    <div class="field"
-
->       <label>🔢 Linha do cabeçalho</label>
-      <input type="number" id="headerRowInput" value="1" min="1" max="50" onchange="onSheetChange()"/>
-    </div>
-    <div class="field"
-
->       <label>📐 Escala renderização PDF</label>
-      <select id="scaleSelect"
-
->         <option value="1">1x</option>
-        <option value="1.5" selected>1.5x ✅</option>
-        <option value="2">2x</option>
-        <option value="3">3x</option>
-      </select>
-    </div>
+>     <div class="field"><label>📋 Aba de destino</label><select id="sheetSelect" onchange="onSheetChange()"><option value="">Carregue o Excel</option></select></div>
+    <div class="field"><label>🔢 Linha do cabeçalho</label><input type="number" id="headerRowInput" value="1" min="1" max="50" onchange="onSheetChange()"/></div>
+    <div class="field"><label>📐 Escala PDF</label><select id="scaleSelect"><option value="1">1x</option><option value="1.5" selected>1.5x ✅</option><option value="2">2x</option><option value="3">3x</option></select></div>
   </div>
   <div class="adv-panel"
 
@@ -248,9 +211,9 @@ HTML = """<!DOCTYPE html>
       <div class="field"><label>Qualidade JPEG</label><input type="number" id="jpegQ" value="92" min="50" max="100"/></div>
       <div class="field"><label>Margem recorte (px)</label><input type="number" id="cropPad" value="3" min="0" max="20"/></div>
       <div class="toggle-row"><input type="checkbox" id="chkClean" checked/><label for="chkClean">🧹 Remover logos</label></div>
-      <div class="toggle-row"><input type="checkbox" id="chkDedup" checked/><label for="chkDedup">🔁 Dedup IoU</label></div>
-      <div class="toggle-row"><input type="checkbox" id="chkFallback" checked/><label for="chkFallback">🛡️ Fallback página</label></div>
-      <div class="toggle-row"><input type="checkbox" id="chkAutoAssign"/><label for="chkAutoAssign">⚡ Auto-distribuir</label></div>
+      <div class="toggle-row"><input type="checkbox" id="chkDedup" checked/><label for="chkDedup">🔁 Dedup</label></div>
+      <div class="toggle-row"><input type="checkbox" id="chkFallback" checked/><label for="chkFallback">🛡️ Fallback</label></div>
+      <div class="toggle-row"><input type="checkbox" id="chkAutoAssign"/><label for="chkAutoAssign">⚡ Auto</label></div>
     </div>
   </div>
   <button class="btn-extract" id="btnExtract" disabled onclick="extractImages()">🔍 Extrair Imagens do PDF</button>
@@ -261,11 +224,7 @@ HTML = """<!DOCTYPE html>
     <div class="sub-bg"><div class="sub-fill" id="subFill"></div></div>
   </div>
   <div class="log-box" id="logBox"></div>
-  <div class="ok-banner" id="okBanner"
-
->     <div class="obi">✅</div>
-    <div><h4 id="okTitle">Excel gerado!</h4><p id="okDesc"></p></div>
-  </div>
+  <div class="ok-banner" id="okBanner"><div class="obi">✅</div><div><h4 id="okTitle">Excel gerado!</h4><p id="okDesc"></p></div></div>
   <div class="stats-bar" id="statsBar"
 
 >     <div class="stat-chip">📄 Páginas: <span class="sv" id="stPages">0</span></div>
@@ -305,11 +264,7 @@ HTML = """<!DOCTYPE html>
     </div>
     <div class="gallery" id="gallery"></div>
   </div>
-  <div class="empty" id="emptyState"
-
->     <div class="ei">📂</div>
-    <p>Carregue um PDF e um template Excel para começar.</p>
-  </div>
+  <div class="empty" id="emptyState"><div class="ei">📂</div><p>Carregue um PDF e um template Excel para começar.</p></div>
 </div>
 <div class="modal-bg" id="modalBg"
 
@@ -343,23 +298,15 @@ async function checkBackend(){
   try{
     const r=await fetch(BACKEND+'/',{signal:AbortSignal.timeout(5000)});
     const d=await r.json();
-    if(r.ok&&d.status==='ok'){
-      backendOnline=true;$('backendDot').classList.add('online');
-      $('backendStatusText').textContent='Servidor online';
-      $('backendStatusSub').textContent=' — pronto para exportar';
-    }else throw new Error();
-  }catch{
-    backendOnline=false;$('backendDot').classList.remove('online');
-    $('backendStatusText').textContent='Servidor offline';
-    $('backendStatusSub').textContent=' — aguardando conexão';
-  }
+    if(r.ok&&d.status==='ok'){backendOnline=true;$('backendDot').classList.add('online');$('backendStatusText').textContent='Servidor online';$('backendStatusSub').textContent=' — pronto para exportar';}
+    else throw new Error();
+  }catch{backendOnline=false;$('backendDot').classList.remove('online');$('backendStatusText').textContent='Servidor offline';$('backendStatusSub').textContent=' — aguardando';}
 }
 checkBackend();setInterval(checkBackend,15000);
 $('pdfInput').addEventListener('change',function(){
   if(!this.files[0])return;
   if(!this.files[0].name.toLowerCase().endsWith('.pdf')){toast('⚠️ .pdf apenas','warn');return}
-  pdfFile=this.files[0];$('pdfFN').textContent='📄 '+pdfFile.name;$('pdfFN').classList.add('visible');
-  checkReady();toast(`📄 ${pdfFile.name}`,'success');
+  pdfFile=this.files[0];$('pdfFN').textContent='📄 '+pdfFile.name;$('pdfFN').classList.add('visible');checkReady();toast(`📄 ${pdfFile.name}`,'success');
 });
 $('excelInput').addEventListener('change',function(){if(this.files[0])loadExcelInfo(this.files[0])});
 ['pdfDZ','excelDZ'].forEach(id=>{
@@ -369,19 +316,12 @@ $('excelInput').addEventListener('change',function(){if(this.files[0])loadExcelI
   z.addEventListener('drop',e=>{
     e.preventDefault();e.stopPropagation();z.classList.remove('drag-over');
     const f=e.dataTransfer.files[0];if(!f)return;
-    if(id==='pdfDZ'){
-      if(!f.name.toLowerCase().endsWith('.pdf')){toast('⚠️ .pdf apenas','warn');return}
-      pdfFile=f;$('pdfFN').textContent='📄 '+f.name;$('pdfFN').classList.add('visible');
-      checkReady();toast(`📄 ${f.name}`,'success');
-    }else{
-      if(!f.name.toLowerCase().endsWith('.xlsx')){toast('⚠️ .xlsx apenas','warn');return}
-      loadExcelInfo(f);
-    }
+    if(id==='pdfDZ'){if(!f.name.toLowerCase().endsWith('.pdf')){toast('⚠️ .pdf','warn');return}pdfFile=f;$('pdfFN').textContent='📄 '+f.name;$('pdfFN').classList.add('visible');checkReady();toast(`📄 ${f.name}`,'success');}
+    else{if(!f.name.toLowerCase().endsWith('.xlsx')){toast('⚠️ .xlsx','warn');return}loadExcelInfo(f);}
   });
 });
 async function loadExcelInfo(f){
-  excelFile=f;$('excelFN').textContent='📊 '+f.name;$('excelFN').classList.add('visible');
-  checkReady();toast(`📊 ${f.name}`,'success');
+  excelFile=f;$('excelFN').textContent='📊 '+f.name;$('excelFN').classList.add('visible');checkReady();toast(`📊 ${f.name}`,'success');
   if(!backendOnline){showBanner('⚠️ Servidor offline.','warn');return}
   try{
     const fd=new FormData();fd.append('template',f);
@@ -389,9 +329,8 @@ async function loadExcelInfo(f){
     const d=await r.json();
     const sel=$('sheetSelect');sel.innerHTML='';
     (d.sheets||[]).forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;sel.appendChild(o)});
-    log(`Excel: ${(d.sheets||[]).length} aba(s)`,'ok');
-    await loadPhotoColumns();
-  }catch(err){showBanner(`❌ Erro: ${err.message}`,'err')}
+    log(`Excel: ${(d.sheets||[]).length} aba(s)`,'ok');await loadPhotoColumns();
+  }catch(err){showBanner(`❌ ${err.message}`,'err')}
 }
 async function onSheetChange(){await loadPhotoColumns()}
 async function loadPhotoColumns(){
@@ -428,37 +367,28 @@ async function extractImages(){
   const overlapT=parseInt($('overlapThresh').value)||85;
   const jpegQ=(parseInt($('jpegQ').value)||92)/100;
   const cropPad=parseInt($('cropPad').value)||3;
-  const doDedup=$('chkDedup').checked;
-  const doFallback=$('chkFallback').checked;
+  const doDedup=$('chkDedup').checked,doFallback=$('chkFallback').checked;
   try{
     const buf=await pdfFile.arrayBuffer();
     const pdf=await pdfjsLib.getDocument({data:buf}).promise;
     const total=pdf.numPages;log(`PDF: ${total} páginas`,'ok');
     for(let p=1;p<=total;p++){
       setP(Math.round(((p-1)/total)*95),`Página ${p}/${total}...`);setSub(0);await yf();
-      const page=await pdf.getPage(p);
-      const vp=page.getViewport({scale});
-      const canvas=document.createElement('canvas');
-      canvas.width=Math.round(vp.width);canvas.height=Math.round(vp.height);
+      const page=await pdf.getPage(p);const vp=page.getViewport({scale});
+      const canvas=document.createElement('canvas');canvas.width=Math.round(vp.width);canvas.height=Math.round(vp.height);
       await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
-      setSub(40);
-      const ops=await page.getOperatorList();
-      const regions=detectRegions(ops,page,vp);
-      const unique=doDedup?dedup(regions,overlapT/100):regions;
+      setSub(40);const ops=await page.getOperatorList();
+      const regions=detectRegions(ops,page,vp);const unique=doDedup?dedup(regions,overlapT/100):regions;
       setSub(70);let cnt=0;
       for(const reg of unique){
         const x0=Math.max(0,Math.round(reg.x)-cropPad),y0=Math.max(0,Math.round(reg.y)-cropPad);
-        const x1=Math.min(canvas.width,Math.round(reg.x+reg.w)+cropPad);
-        const y1=Math.min(canvas.height,Math.round(reg.y+reg.h)+cropPad);
+        const x1=Math.min(canvas.width,Math.round(reg.x+reg.w)+cropPad),y1=Math.min(canvas.height,Math.round(reg.y+reg.h)+cropPad);
         const cw=x1-x0,ch=y1-y0;if(cw<minSize||ch<minSize)continue;
         const crop=document.createElement('canvas');crop.width=cw;crop.height=ch;
         crop.getContext('2d').drawImage(canvas,x0,y0,cw,ch,0,0,cw,ch);
         cnt++;extractedImages.push({dataUrl:crop.toDataURL('image/jpeg',jpegQ),w:cw,h:ch,page:p,seq:cnt,idx:extractedImages.length,selected:true});
       }
-      if(cnt===0&&doFallback){
-        log(`P${p}: fallback`,'warn');
-        extractedImages.push({dataUrl:canvas.toDataURL('image/jpeg',jpegQ),w:canvas.width,h:canvas.height,page:p,seq:1,idx:extractedImages.length,selected:true});cnt=1;
-      }
+      if(cnt===0&&doFallback){log(`P${p}: fallback`,'warn');extractedImages.push({dataUrl:canvas.toDataURL('image/jpeg',jpegQ),w:canvas.width,h:canvas.height,page:p,seq:1,idx:extractedImages.length,selected:true});cnt=1;}
       setSub(100);log(`P${p}: ${cnt} foto(s)`,'ok');
     }
     setP(100,'Concluído!');setTimeout(()=>pw.classList.remove('visible'),900);
@@ -495,11 +425,9 @@ function iou(a,b){const x0=Math.max(a.x,b.x),y0=Math.max(a.y,b.y),x1=Math.min(a.
 function cleanImages(images){
   if(!$('chkClean').checked)return images;
   const areas=images.map(i=>i.w*i.h).sort((a,b)=>a-b);
-  const med=areas[Math.floor(areas.length/2)]||0;
-  const minA=Math.max(6000,med*0.15);const out=[];
+  const med=areas[Math.floor(areas.length/2)]||0;const minA=Math.max(6000,med*0.15);const out=[];
   for(const img of images){const a=img.w*img.h,r=img.w/img.h;if(img.w<80||img.h<80||a<minA||r>6||r<0.16)continue;out.push(img)}
-  const rm=images.length-out.length;if(rm>0)log(`Filtro: ${rm} removido(s)`,'warn');
-  return out;
+  const rm=images.length-out.length;if(rm>0)log(`Filtro: ${rm} removido(s)`,'warn');return out;
 }
 function buildAssignPanel(){
   if(!photoColumns.length)return;
@@ -529,8 +457,7 @@ function renderAssignGrid(){
   const selImgs=extractedImages.filter(i=>i.selected);
   if(!selImgs.length){grid.innerHTML='<div style="color:#475569;font-size:.8rem;grid-column:1/-1;padding:16px">Selecione imagens na galeria</div>';return}
   selImgs.forEach(img=>{
-    const ac=findAssignedCol(img.idx);
-    const card=document.createElement('div');
+    const ac=findAssignedCol(img.idx);const card=document.createElement('div');
     card.className='assign-card'+(ac!==null?' assigned':'');card.dataset.idx=img.idx;
     const cd=ac!==null?photoColumns.find(c=>c.colNum===ac):null;
     const pos=cd?(assignments[cd.colNum].indexOf(img.idx)+1):0;
@@ -599,8 +526,7 @@ function toggle(i){extractedImages[i].selected=!extractedImages[i].selected;refr
 function setState(i,v){
   extractedImages[i].selected=v;
   if(!v){photoColumns.forEach(c=>{assignments[c.colNum]=(assignments[c.colNum]||[]).filter(x=>x!==i)});buildColTabs();updateAssignSummary();updateExportBtn()}
-  refresh(i);updateStats();
-  if($('assignPanel').classList.contains('visible'))renderAssignGrid();
+  refresh(i);updateStats();if($('assignPanel').classList.contains('visible'))renderAssignGrid();
 }
 function refresh(i){const c=document.querySelector(`.img-card[data-idx="${i}"]`);if(!c)return;const img=extractedImages[i];c.className=`img-card ${img.selected?'selected':'rejected'}`;c.querySelector('.chk').textContent=img.selected?'✓':'✕'}
 function updateStats(){
@@ -614,13 +540,11 @@ async function exportExcel(){
   if(!totalA){toast('⚠️ Atribua fotos.','warn');return}
   if(!excelFile){toast('⚠️ Carregue o template.','warn');return}
   if(!backendOnline){toast('❌ Servidor offline.','error');return}
-  const sheetName=$('sheetSelect').value;
-  const headerRow=parseInt($('headerRowInput').value)||1;
+  const sheetName=$('sheetSelect').value,headerRow=parseInt($('headerRowInput').value)||1;
   if(!sheetName){toast('⚠️ Escolha a aba.','warn');return}
   const modal=$('modalBg');modal.classList.add('visible');
   $('mIcon').textContent='⚙️';$('mTitle').textContent='Enviando para o servidor';
-  $('mSub').textContent=`${totalA} fotos`;
-  setM(0,'Preparando...','');await yf();
+  $('mSub').textContent=`${totalA} fotos`;setM(0,'Preparando...','');await yf();
   try{
     const formData=new FormData();
     formData.append('template',excelFile);
@@ -629,17 +553,12 @@ async function exportExcel(){
     const allAssigned=[...new Set(Object.values(assignments).flat())];
     const assignByName={};
     for(let k=0;k<allAssigned.length;k++){
-      const imgIdx=allAssigned[k];
-      const img=extractedImages[imgIdx];
-      const fname=`foto_${imgIdx}.jpg`;
+      const imgIdx=allAssigned[k];const img=extractedImages[imgIdx];const fname=`foto_${imgIdx}.jpg`;
       formData.append('images',dataUrlToBlob(img.dataUrl),fname);
       setM(Math.round((k/allAssigned.length)*30),`Preparando ${k+1}/${allAssigned.length}`,`${k+1}/${allAssigned.length}`);
       if(k%5===0)await yf();
     }
-    for(const col of photoColumns){
-      const assigned=assignments[col.colNum]||[];
-      if(assigned.length>0)assignByName[col.name]=assigned.map(idx=>`foto_${idx}.jpg`);
-    }
+    for(const col of photoColumns){const assigned=assignments[col.colNum]||[];if(assigned.length>0)assignByName[col.name]=assigned.map(idx=>`foto_${idx}.jpg`);}
     formData.append('assignments',JSON.stringify(assignByName));
     setM(35,'Enviando...','');await yf();
     const response=await fetch(BACKEND+'/gerar-excel',{method:'POST',body:formData});
@@ -648,30 +567,21 @@ async function exportExcel(){
     if(ct.includes('json')){const err=await response.json();throw new Error(err.error||`HTTP ${response.status}`)}
     if(!response.ok)throw new Error(`HTTP ${response.status}`);
     const blob=await response.blob();
-    setM(100,'Concluído!',`${totalA} fotos`);
-    $('mIcon').textContent='✅';$('mTitle').textContent='Excel Gerado!';
+    setM(100,'Concluído!',`${totalA} fotos`);$('mIcon').textContent='✅';$('mTitle').textContent='Excel Gerado!';
     await yf();setTimeout(()=>modal.classList.remove('visible'),1300);
-    const url=URL.createObjectURL(blob);
-    const a=document.createElement('a');
+    const url=URL.createObjectURL(blob);const a=document.createElement('a');
     a.href=url;a.download=(excelFile.name.replace(/\.xlsx$/i,'')||'template')+'_com_fotos.xlsx';
-    document.body.appendChild(a);a.click();document.body.removeChild(a);
-    setTimeout(()=>URL.revokeObjectURL(url),8000);
+    document.body.appendChild(a);a.click();document.body.removeChild(a);setTimeout(()=>URL.revokeObjectURL(url),8000);
     $('okTitle').textContent=`✅ ${totalA} fotos inseridas!`;
     $('okDesc').textContent=`Aba "${sheetName}" • Template preservado`;
-    $('okBanner').classList.add('visible');
-    toast(`✅ ${totalA} fotos!`,'success');
+    $('okBanner').classList.add('visible');toast(`✅ ${totalA} fotos!`,'success');
     log(`OK: ${totalA} fotos → "${sheetName}"`,'ok');
-  }catch(err){
-    modal.classList.remove('visible');
-    toast('❌ '+err.message,'error');log('ERRO: '+err.message,'err');console.error(err);
-  }
+  }catch(err){modal.classList.remove('visible');toast('❌ '+err.message,'error');log('ERRO: '+err.message,'err');console.error(err)}
 }
 function dataUrlToBlob(dataUrl){
-  const parts=dataUrl.split(',');
-  const mime=parts[0].match(/:(.*?);/)[1];
+  const parts=dataUrl.split(',');const mime=parts[0].match(/:(.*?);/)[1];
   const bin=atob(parts[1]);const arr=new Uint8Array(bin.length);
-  for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);
-  return new Blob([arr],{type:mime});
+  for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);return new Blob([arr],{type:mime});
 }
 function idxToCol(num){let c='';while(num>0){const m=(num-1)%26;c=String.fromCharCode(65+m)+c;num=Math.floor((num-m)/26)}return c}
 </script>
@@ -721,7 +631,10 @@ def api_root():
 async def info_abas(template: UploadFile = File(...)):
     try:
         data = await template.read()
-        wb   = load_workbook(io.BytesIO(data), read_only=True)
+        
+
+# ── keep_vba=True preserva macros/VBA e evita XML inválido ──
+        wb   = load_workbook(io.BytesIO(data), read_only=True, keep_vba=True)
         return {"sheets": wb.sheetnames}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -735,7 +648,7 @@ async def info_colunas(
 ):
     try:
         data = await template.read()
-        wb   = load_workbook(io.BytesIO(data))
+        wb   = load_workbook(io.BytesIO(data), keep_vba=True)
         if sheet_name not in wb.sheetnames:
             return {"error": f"Aba '{sheet_name}' não encontrada", "columns": []}
         ws   = wb[sheet_name]
@@ -755,10 +668,19 @@ async def gerar_excel(
 ):
     tmp         = tempfile.mkdtemp()
     output_path = os.path.join(tmp, f"out_{uuid.uuid4().hex}.xlsx")
+
     try:
+        
+
+# ── Salvar template em disco ──────────────────────
         tpl_path = os.path.join(tmp, "template.xlsx")
+        tpl_bytes = await template.read()
         with open(tpl_path, "wb") as f:
-            f.write(await template.read())
+            f.write(tpl_bytes)
+
+        
+
+# ── Salvar imagens ────────────────────────────────
         img_map = {}
         for up in images:
             raw      = await up.read()
@@ -766,44 +688,95 @@ async def gerar_excel(
             with open(img_path, "wb") as f:
                 f.write(raw)
             img_map[up.filename] = img_path
-        print(f"[DEBUG] Imagens: {list(img_map.keys())}")
-        wb = load_workbook(tpl_path)
+
+        print(f"[DEBUG] Imagens recebidas: {list(img_map.keys())}")
+
+        
+
+# ── Abrir workbook preservando estrutura ──────────
+        
+
+# keep_vba=True → não quebra templates com VML/validações
+        wb = load_workbook(tpl_path, keep_vba=True)
+
         if sheet_name not in wb.sheetnames:
-            return JSONResponse({"error": f"Aba '{sheet_name}' não encontrada"}, status_code=400)
+            return JSONResponse(
+                {"error": f"Aba '{sheet_name}' não encontrada"},
+                status_code=400
+            )
+
         ws          = wb[sheet_name]
         photo_cols  = find_photo_columns(ws, header_row)
         col_by_name = {c['name']: c['col'] for c in photo_cols}
         assign      = json.loads(assignments)
         first_row   = header_row + 1
-        print(f"[DEBUG] assignments: {assign}")
+
         print(f"[DEBUG] col_by_name: {col_by_name}")
+        print(f"[DEBUG] assignments: {assign}")
+
         for col_name, filenames in assign.items():
             col_num = col_by_name.get(col_name)
             if col_num is None:
+                print(f"[WARN] Coluna não encontrada: {col_name}")
                 continue
+
             for row_offset, fname in enumerate(filenames):
                 img_path = img_map.get(fname)
                 if not img_path or not os.path.exists(img_path):
+                    print(f"[WARN] Imagem não encontrada: {fname}")
                     continue
+
                 row_num = first_row + row_offset
-                pil     = PILImage.open(img_path)
+
+                
+
+# Redimensionar mantendo proporção
+                pil = PILImage.open(img_path)
                 pil.thumbnail((300, 200), PILImage.LANCZOS)
                 resized = os.path.join(tmp, f"r_{uuid.uuid4().hex}.jpg")
                 pil.convert("RGB").save(resized, "JPEG", quality=90)
+
+                
+
+# Altura da linha
                 _, h_px = pil.size
                 ws.row_dimensions[row_num].height = max(h_px * 0.75 + 4, 20)
+
+                
+
+# Inserir imagem na célula
                 cell_ref      = ws.cell(row=row_num, column=col_num).coordinate
                 xl_img        = XLImage(resized)
                 xl_img.anchor = cell_ref
                 ws.add_image(xl_img)
-                print(f"[DEBUG] ✅ {fname} → {col_name} L{row_num}")
+
+                print(f"[DEBUG] ✅ {fname} → {col_name} linha {row_num} ({cell_ref})")
+
+        
+
+# ── Salvar resultado ──────────────────────────────
         wb.save(output_path)
+        print(f"[DEBUG] Salvo: {output_path}")
+
         return FileResponse(
             output_path,
             filename="template_com_fotos.xlsx",
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+
     except Exception as e:
         import traceback
-        print(f"[ERRO] {traceback.format_exc()}")
-        return JSONResponse({"error": str(e)}, status_code=500)
+        tb = traceback.format_exc()
+        print(f"[ERRO]\n{tb}")
+        return JSONResponse({"error": str(e), "trace": tb}, status_code=500)
+
+    finally:
+        
+
+# Limpar arquivos temporários após 60s
+        import threading
+        def cleanup():
+            import time
+            time.sleep(60)
+            shutil.rmtree(tmp, ignore_errors=True)
+        threading.Thread(target=cleanup, daemon=True).start()
