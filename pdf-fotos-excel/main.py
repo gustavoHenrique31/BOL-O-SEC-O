@@ -1,782 +1,1374 @@
+import base64
+import io
+import json
+import os
+import re
+import tempfile
+import unicodedata
+from copy import copy
+from typing import Any, Dict, List, Optional
+
 from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
-from PIL import Image as PILImage
-import tempfile, json, os, uuid, io, shutil
-from typing import List
+from openpyxl.utils import get_column_letter, column_index_from_string
+from PIL import Image as PILImage, ImageOps
+from starlette.background import BackgroundTask
 
-app = FastAPI()
+
+app = FastAPI(title="Exportador de Fotos para Excel")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-HTML = r"""<!DOCTYPE html>
+
+# ============================================================
+# Utilitários
+# ============================================================
+
+def normalize_text(value: Any) -> str:
+    """
+    Normaliza texto para comparação:
+    - remove acentos
+    - converte para minúsculo
+    - remove espaços excedentes
+    """
+    if value is None:
+        return ""
+
+    text = str(value).strip()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = text.lower()
+    text = re.sub(r"\s+", " ", text)
+
+    return text
+
+
+def is_foto_header(value: Any) -> bool:
+    """
+    Identifica cabeçalhos do tipo:
+    Foto
+    Foto_1
+    Foto 1
+    Foto-1
+    FOTO_2
+    """
+    text = normalize_text(value)
+    if not text:
+        return False
+
+    return bool(re.match(r"^foto([\s_-]*\d+)?$", text))
+
+
+def safe_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def str_to_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+
+    if value is None:
+        return False
+
+    return str(value).strip().lower() in ["true", "1", "yes", "sim", "s"]
+
+
+def decode_data_url(data_url: str) -> bytes:
+    """
+    Aceita:
+    - data:image/jpeg;base64,/9j/...
+    - /9j/...
+    """
+    if not data_url:
+        raise ValueError("Imagem vazia.")
+
+    if "," in data_url:
+        data_url = data_url.split(",", 1)[1]
+
+    return base64.b64decode(data_url)
+
+
+def prepare_image(
+    image_bytes: bytes,
+    max_width: int,
+    max_height: int,
+    quality: int = 88,
+):
+    """
+    Redimensiona a imagem mantendo proporção e converte para JPEG.
+    Retorna:
+    - buffer BytesIO
+    - largura final
+    - altura final
+    """
+    input_buffer = io.BytesIO(image_bytes)
+
+    with PILImage.open(input_buffer) as img:
+        img = ImageOps.exif_transpose(img)
+
+        if img.mode not in ["RGB"]:
+            img = img.convert("RGB")
+
+        img.thumbnail((max_width, max_height), PILImage.Resampling.LANCZOS)
+
+        output_buffer = io.BytesIO()
+        img.save(
+            output_buffer,
+            format="JPEG",
+            quality=quality,
+            optimize=True
+        )
+        output_buffer.seek(0)
+
+        return output_buffer, img.width, img.height
+
+
+def copy_cell_style(source_cell, target_cell):
+    """
+    Copia estilo básico de uma célula para outra.
+    Útil para dar aparência parecida aos cabeçalhos Foto_x.
+    """
+    if source_cell is None or target_cell is None:
+        return
+
+    if source_cell.has_style:
+        target_cell.font = copy(source_cell.font)
+        target_cell.fill = copy(source_cell.fill)
+        target_cell.border = copy(source_cell.border)
+        target_cell.alignment = copy(source_cell.alignment)
+        target_cell.number_format = source_cell.number_format
+        target_cell.protection = copy(source_cell.protection)
+
+
+def detect_photo_columns(ws, header_row: int) -> Dict[str, Any]:
+    """
+    Detecta colunas Foto_x.
+
+    Regra:
+    1. Se existirem colunas com cabeçalho Foto_1, Foto_2 etc., usa essas colunas.
+    2. Se não existirem, usa as colunas vazias após a última coluna nomeada.
+       No template enviado, isso equivale às colunas O até AF.
+    3. Se o Excel não preservar as colunas vazias, cria virtualmente 18 colunas após a última coluna nomeada.
+    """
+
+    max_col = ws.max_column
+
+    header_cells = []
+    last_named_col = 0
+
+    for col_idx in range(1, max_col + 1):
+        cell = ws.cell(row=header_row, column=col_idx)
+        raw_value = cell.value
+        name = str(raw_value).strip() if raw_value is not None else ""
+
+        if name:
+            last_named_col = col_idx
+
+        header_cells.append({
+            "col": col_idx,
+            "letter": get_column_letter(col_idx),
+            "name": name,
+            "is_blank": not bool(name)
+        })
+
+    explicit_photo_columns = []
+
+    for item in header_cells:
+        if is_foto_header(item["name"]):
+            explicit_photo_columns.append({
+                "name": item["name"],
+                "col": item["col"],
+                "letter": item["letter"],
+                "source": "explicit"
+            })
+
+    if explicit_photo_columns:
+        explicit_photo_columns.sort(key=lambda x: x["col"])
+
+        return {
+            "mode": "explicit",
+            "last_named_col": last_named_col,
+            "columns": explicit_photo_columns,
+            "message": "Colunas Foto_x encontradas no cabeçalho do Excel."
+        }
+
+    
+
+# Caso não encontre Foto_x, usa as colunas vazias depois da última coluna nomeada.
+    
+
+# No seu template, última coluna nomeada é N, depois vêm O:AF vazias.
+    blank_photo_columns = []
+
+    if max_col > last_named_col:
+        count_blank = max_col - last_named_col
+    else:
+        
+
+# Fallback caso o Excel não preserve colunas vazias.
+        
+
+# Cria Foto_1 até Foto_18 após a última coluna nomeada.
+        count_blank = 18
+
+    for i in range(count_blank):
+        col_idx = last_named_col + 1 + i
+        blank_photo_columns.append({
+            "name": f"Foto_{i + 1}",
+            "col": col_idx,
+            "letter": get_column_letter(col_idx),
+            "source": "blank_after_last_named"
+        })
+
+    return {
+        "mode": "blank_after_last_named",
+        "last_named_col": last_named_col,
+        "columns": blank_photo_columns,
+        "message": (
+            "Nenhuma coluna Foto_x foi encontrada. "
+            "As colunas vazias após a última coluna nomeada serão tratadas como Foto_1, Foto_2 etc."
+        )
+    }
+
+
+# ============================================================
+# Frontend embutido no backend
+# ============================================================
+
+INDEX_HTML = """
+<!DOCTYPE html>
 <html lang="pt-BR"
 
 > <head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>PDF → Fotos Excel</title>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <meta charset="UTF-8" />
+  <title>Exportador de Fotos para Excel</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
   <style>
-    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh}
-    header{background:linear-gradient(135deg,#1e40af,#7c3aed);padding:20px 32px;display:flex;align-items:center;gap:14px;box-shadow:0 4px 20px rgba(0,0,0,.4)}
-    header .logo{font-size:2rem}
-    header h1{font-size:1.35rem;font-weight:700}
-    header p{font-size:.8rem;opacity:.8;margin-top:2px}
-    .container{max-width:1300px;margin:0 auto;padding:28px 20px}
-    .backend-status{display:flex;align-items:center;gap:10px;background:#1e2130;border-radius:10px;padding:10px 16px;margin-bottom:20px;font-size:.82rem}
-    .dot{width:10px;height:10px;border-radius:50%;background:#ef4444;flex-shrink:0;transition:background .3s}
-    .dot.online{background:#10b981}
-    .backend-status span{color:#94a3b8}
-    .backend-status strong{color:#e2e8f0}
-    .upload-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px}
-    @media(max-width:700px){.upload-grid{grid-template-columns:1fr}}
-    .upload-zone{background:#1e2130;border:2px dashed #3b4262;border-radius:14px;padding:28px 20px;text-align:center;transition:all .25s}
-    .upload-zone.drag-over,.upload-zone:hover{border-color:#6366f1;background:#1a1d3a}
-    .upload-zone label{display:block;cursor:pointer}
-    .upload-zone input[type=file]{display:none}
-    .uz-icon{font-size:2.4rem;margin-bottom:8px}
-    .upload-zone h2{font-size:.95rem;font-weight:700;margin-bottom:5px}
-    .upload-zone p{font-size:.76rem;color:#94a3b8}
-    .fn{margin-top:10px;font-size:.78rem;color:#a5b4fc;font-weight:600;word-break:break-all;display:none}
-    .fn.visible{display:block}
-    .config-panel{background:#1e2130;border-radius:14px;padding:18px 20px;margin-bottom:18px;display:grid;grid-template-columns:repeat(3,1fr);gap:14px;align-items:end}
-    @media(max-width:900px){.config-panel{grid-template-columns:1fr 1fr}}
-    .field label{display:block;font-size:.72rem;color:#94a3b8;margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:.4px}
-    .field input,.field select{width:100%;background:#0f1117;border:1.5px solid #3b4262;border-radius:8px;padding:8px 11px;color:#e2e8f0;font-size:.86rem;outline:none;transition:border-color .2s}
-    .field input:focus,.field select:focus{border-color:#6366f1}
-    .adv-panel{background:#1a1d2e;border:1px solid #2d3155;border-radius:12px;padding:16px 18px;margin-bottom:18px}
-    .adv-panel h4{font-size:.76rem;font-weight:700;color:#a5b4fc;text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px}
-    .adv-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
-    @media(max-width:900px){.adv-grid{grid-template-columns:1fr 1fr}}
-    .toggle-row{display:flex;align-items:center;gap:9px;background:#0f1117;border-radius:8px;padding:8px 11px;border:1px solid #2d3155}
-    .toggle-row label{font-size:.74rem;color:#94a3b8;cursor:pointer;flex:1}
-    .toggle-row input[type=checkbox]{width:14px;height:14px;accent-color:#6366f1;cursor:pointer}
-    .info-banner{display:none;border-radius:10px;padding:11px 15px;margin-bottom:16px;font-size:.8rem;gap:9px;align-items:flex-start}
-    .info-banner.visible{display:flex}
-    .info-banner.ok{background:#1a2744;border:1px solid #3b5998;color:#93c5fd}
-    .info-banner.ok strong{color:#bfdbfe}
-    .info-banner.warn{background:#2d1f00;border:1px solid #92400e;color:#fcd34d}
-    .info-banner.err{background:#2d0000;border:1px solid #7f1d1d;color:#fca5a5}
-    .btn-extract{width:100%;padding:14px;border-radius:11px;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;font-size:.96rem;font-weight:700;border:none;cursor:pointer;transition:all .25s;display:flex;align-items:center;justify-content:center;gap:9px;margin-bottom:20px}
-    .btn-extract:hover{opacity:.88;transform:translateY(-2px)}
-    .btn-extract:disabled{opacity:.35;cursor:not-allowed;transform:none}
-    .progress-wrap{display:none;background:#1e2130;border-radius:12px;padding:14px 18px;margin-bottom:16px}
-    .progress-wrap.visible{display:block}
-    .prog-top{display:flex;justify-content:space-between;font-size:.78rem;color:#94a3b8;margin-bottom:6px}
-    .prog-bg{height:9px;background:#0f1117;border-radius:99px;overflow:hidden;margin-bottom:4px}
-    .prog-fill{height:100%;width:0%;border-radius:99px;background:linear-gradient(90deg,#6366f1,#8b5cf6);transition:width .3s}
-    .sub-bg{height:4px;background:#0f1117;border-radius:99px;overflow:hidden}
-    .sub-fill{height:100%;width:0%;border-radius:99px;background:linear-gradient(90deg,#10b981,#059669);transition:width .2s}
-    .log-box{background:#0a0c12;border:1px solid #1e2130;border-radius:9px;padding:8px 12px;font-size:.7rem;color:#64748b;max-height:110px;overflow-y:auto;margin-bottom:16px;display:none;font-family:monospace;line-height:1.7}
-    .log-box.visible{display:block}
-    .lok{color:#10b981}.lwarn{color:#f59e0b}.lerr{color:#ef4444}.linfo{color:#818cf8}
-    .stats-bar{display:none;gap:9px;flex-wrap:wrap;margin-bottom:16px}
-    .stats-bar.visible{display:flex}
-    .stat-chip{background:#1e2130;border-radius:8px;padding:6px 14px;font-size:.77rem;display:flex;align-items:center;gap:7px}
-    .stat-chip .sv{font-weight:700;color:#a5b4fc}
-    .assign-panel{background:#1e2130;border-radius:14px;padding:18px 20px;margin-bottom:20px;display:none}
-    .assign-panel.visible{display:block}
-    .assign-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px}
-    .assign-header h3{font-size:.95rem;font-weight:700}
-    .assign-actions{display:flex;gap:8px;flex-wrap:wrap}
-    .col-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid #2d3155}
-    .col-tab{padding:5px 14px;border-radius:99px;border:1.5px solid #3b4262;background:#0f1117;color:#94a3b8;font-size:.76rem;font-weight:600;cursor:pointer;transition:all .2s}
-    .col-tab.active{border-color:#6366f1;color:#fff;background:#4f46e5}
-    .col-tab.has-photos{border-color:#10b981;color:#10b981}
-    .col-tab.active.has-photos{background:#059669;border-color:#059669;color:#fff}
-    .assign-instr{font-size:.75rem;color:#64748b;margin-bottom:10px}
-    .assign-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:9px}
-    .assign-card{border-radius:10px;overflow:hidden;border:2px solid #2d3155;cursor:pointer;transition:all .2s;background:#0f1117;position:relative}
-    .assign-card:hover{transform:translateY(-2px);box-shadow:0 6px 18px rgba(0,0,0,.4)}
-    .assign-card.assigned{border-color:#6366f1;background:#1a1d3a}
-    .assign-card .ac-thumb{aspect-ratio:1;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#0a0c12}
-    .assign-card .ac-thumb img{max-width:100%;max-height:100%;object-fit:contain}
-    .assign-card .ac-col-tag{position:absolute;top:5px;right:5px;font-size:.6rem;font-weight:700;padding:2px 7px;border-radius:99px;background:#6366f1;color:#fff;display:none}
-    .assign-card.assigned .ac-col-tag{display:block}
-    .assign-card .ac-foot{padding:4px 7px;display:flex;justify-content:space-between}
-    .assign-card .ac-idx{font-size:.64rem;color:#64748b;font-weight:600}
-    .assign-card .ac-pg{font-size:.6rem;color:#475569}
-    .assign-summary{margin-top:14px;padding-top:12px;border-top:1px solid #2d3155;display:flex;flex-wrap:wrap;gap:8px}
-    .sum-chip{background:#0f1117;border-radius:8px;padding:5px 12px;font-size:.75rem;color:#94a3b8;border:1px solid #2d3155}
-    .sum-chip strong{color:#a5b4fc}
-    .gallery-header{font-size:.95rem;font-weight:700;margin-bottom:11px;display:flex;align-items:center;gap:9px}
-    .badge{background:#6366f1;color:#fff;font-size:.7rem;font-weight:700;padding:2px 9px;border-radius:99px}
-    .page-filters{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:11px}
-    .pf-btn{padding:3px 11px;border-radius:99px;border:1.5px solid #3b4262;background:#1e2130;color:#94a3b8;font-size:.72rem;font-weight:600;cursor:pointer;transition:all .2s}
-    .pf-btn.active,.pf-btn:hover{border-color:#6366f1;color:#a5b4fc;background:#1a1d3a}
-    .sel-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:14px}
-    .sel-bar .spacer{flex:1}
-    .btn-sm{display:inline-flex;align-items:center;gap:5px;padding:7px 13px;border-radius:8px;font-size:.78rem;font-weight:600;cursor:pointer;border:none;transition:all .2s;white-space:nowrap}
-    .btn-outline{background:transparent;border:1.5px solid #3b4262;color:#e2e8f0}
-    .btn-outline:hover{border-color:#6366f1;color:#a5b4fc}
-    .btn-green{background:linear-gradient(135deg,#059669,#10b981);color:#fff}
-    .btn-green:hover{opacity:.88;transform:translateY(-1px)}
-    .btn-green:disabled{opacity:.35;cursor:not-allowed;transform:none}
-    .sel-info{font-size:.78rem;color:#94a3b8;background:#1e2130;padding:5px 11px;border-radius:8px}
-    .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:10px;margin-bottom:28px}
-    .img-card{background:#1e2130;border-radius:10px;overflow:hidden;border:2px solid transparent;cursor:pointer;transition:all .2s;position:relative}
-    .img-card:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(0,0,0,.4)}
-    .img-card.selected{border-color:#6366f1;box-shadow:0 0 0 3px rgba(99,102,241,.25)}
-    .img-card.rejected{opacity:.25;filter:grayscale(80%)}
-    .thumb{position:relative;aspect-ratio:1;background:#0a0c12;display:flex;align-items:center;justify-content:center;overflow:hidden}
-    .thumb img{max-width:100%;max-height:100%;object-fit:contain;display:block}
-    .chk{position:absolute;top:6px;right:6px;width:21px;height:21px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.76rem;font-weight:700;z-index:2}
-    .img-card.selected .chk{background:#6366f1;color:#fff}
-    .img-card:not(.selected):not(.rejected) .chk{background:rgba(255,255,255,.1);color:#94a3b8}
-    .img-card.rejected .chk{background:#dc2626;color:#fff}
-    .pg-badge{position:absolute;bottom:4px;left:4px;background:rgba(0,0,0,.75);color:#94a3b8;font-size:.6rem;padding:1px 6px;border-radius:99px;z-index:2}
-    .sq-badge{position:absolute;top:6px;left:6px;background:rgba(0,0,0,.75);color:#e2e8f0;font-size:.6rem;padding:1px 6px;border-radius:99px;font-weight:700;z-index:2}
-    .card-foot{padding:5px 8px;display:flex;justify-content:space-between}
-    .card-foot .ci{font-size:.67rem;color:#64748b;font-weight:600}
-    .card-foot .cs{font-size:.62rem;color:#475569}
-    .card-acts{display:flex;gap:3px;padding:0 8px 7px}
-    .mb{flex:1;padding:4px;border-radius:6px;border:none;font-size:.63rem;font-weight:600;cursor:pointer;transition:all .15s}
-    .mb.ok{background:#1a3a2a;color:#10b981}.mb.ok:hover{background:#059669;color:#fff}
-    .mb.no{background:#3a1a1a;color:#f87171}.mb.no:hover{background:#dc2626;color:#fff}
-    .empty{text-align:center;padding:48px 20px;color:#475569}
-    .empty .ei{font-size:3.2rem;margin-bottom:12px}
-    .empty p{font-size:.86rem}
-    .modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:1000;align-items:center;justify-content:center}
-    .modal-bg.visible{display:flex}
-    .modal{background:#1e2130;border-radius:18px;padding:34px 40px;max-width:440px;width:92%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.6)}
-    .modal .mi{font-size:2.6rem;margin-bottom:12px}
-    .modal h3{font-size:1.05rem;font-weight:700;margin-bottom:5px}
-    .modal .ms{font-size:.78rem;color:#94a3b8;margin-bottom:16px}
-    .mpb{height:11px;background:#0f1117;border-radius:99px;overflow:hidden;margin-bottom:7px}
-    .mpf{height:100%;width:0%;border-radius:99px;background:linear-gradient(90deg,#6366f1,#10b981);transition:width .4s}
-    .mlb{font-size:.78rem;color:#94a3b8;margin-bottom:3px}
-    .mcnt{font-size:.98rem;font-weight:700;color:#a5b4fc}
-    .ok-banner{display:none;background:linear-gradient(135deg,#064e3b,#065f46);border:1px solid #10b981;border-radius:11px;padding:13px 17px;margin-bottom:16px;align-items:center;gap:12px}
-    .ok-banner.visible{display:flex}
-    .ok-banner .obi{font-size:1.6rem}
-    .ok-banner h4{font-size:.9rem;font-weight:700;color:#6ee7b7}
-    .ok-banner p{font-size:.76rem;color:#a7f3d0;margin-top:2px}
-    #toast{position:fixed;bottom:22px;right:22px;background:#1e2130;color:#e2e8f0;padding:11px 17px;border-radius:10px;font-size:.82rem;font-weight:500;box-shadow:0 8px 28px rgba(0,0,0,.5);border-left:4px solid #6366f1;transform:translateY(80px);opacity:0;transition:all .3s;z-index:9999;max-width:330px}
-    #toast.show{transform:translateY(0);opacity:1}
-    #toast.success{border-left-color:#10b981}
-    #toast.error{border-left-color:#ef4444}
-    #toast.warn{border-left-color:#f59e0b}
+    :root {
+      --bg: #f4f6f8;
+      --card: #ffffff;
+      --primary: #0057ff;
+      --primary-dark: #003bb5;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --border: #d1d5db;
+      --success: #16a34a;
+      --danger: #dc2626;
+      --warn: #f59e0b;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    header {
+      background: #111827;
+      color: white;
+      padding: 22px 28px;
+    }
+
+    header h1 {
+      margin: 0;
+      font-size: 22px;
+    }
+
+    header p {
+      margin: 6px 0 0;
+      color: #d1d5db;
+      font-size: 14px;
+    }
+
+    main {
+      max-width: 1280px;
+      margin: 24px auto;
+      padding: 0 18px 40px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 18px;
+    }
+
+    @media (max-width: 900px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04);
+    }
+
+    .card h2 {
+      margin: 0 0 14px;
+      font-size: 18px;
+    }
+
+    .field {
+      margin-bottom: 14px;
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+
+    input[type="file"],
+    input[type="number"],
+    select {
+      width: 100%;
+      padding: 9px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: white;
+      font-size: 14px;
+    }
+
+    input[type="checkbox"] {
+      transform: scale(1.05);
+      margin-right: 6px;
+    }
+
+    button {
+      border: 0;
+      background: var(--primary);
+      color: white;
+      padding: 11px 14px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    button:hover {
+      background: var(--primary-dark);
+    }
+
+    button:disabled {
+      background: #9ca3af;
+      cursor: not-allowed;
+    }
+
+    .btn-secondary {
+      background: #374151;
+    }
+
+    .btn-secondary:hover {
+      background: #1f2937;
+    }
+
+    .btn-danger {
+      background: var(--danger);
+    }
+
+    .btn-danger:hover {
+      background: #991b1b;
+    }
+
+    .row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .row > * {
+      flex: 1;
+    }
+
+    .status {
+      padding: 10px 12px;
+      border-radius: 8px;
+      font-size: 13px;
+      margin-top: 10px;
+      display: none;
+    }
+
+    .status.visible {
+      display: block;
+    }
+
+    .status.info {
+      background: #e0ecff;
+      color: #1e3a8a;
+    }
+
+    .status.success {
+      background: #dcfce7;
+      color: #166534;
+    }
+
+    .status.warn {
+      background: #fef3c7;
+      color: #92400e;
+    }
+
+    .status.error {
+      background: #fee2e2;
+      color: #991b1b;
+    }
+
+    .photo-columns {
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      background: #f9fafb;
+      font-size: 13px;
+      max-height: 180px;
+      overflow: auto;
+    }
+
+    .image-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+      gap: 14px;
+    }
+
+    .image-card {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: white;
+      padding: 10px;
+    }
+
+    .image-card img {
+      width: 100%;
+      height: 145px;
+      object-fit: contain;
+      background: #f3f4f6;
+      border-radius: 8px;
+      border: 1px solid #e5e7eb;
+    }
+
+    .image-card .name {
+      font-size: 13px;
+      font-weight: 700;
+      margin: 8px 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .image-card .meta {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 8px;
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .actions button {
+      flex: 1;
+    }
+
+    .small {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 3px 7px;
+      background: #e5e7eb;
+      color: #374151;
+      border-radius: 999px;
+      font-size: 12px;
+      margin: 2px;
+    }
+
+    .overlay {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(17, 24, 39, 0.55);
+      z-index: 9999;
+    }
+
+    .overlay.visible {
+      display: flex;
+    }
+
+    .modal {
+      background: white;
+      padding: 22px;
+      border-radius: 12px;
+      width: min(420px, calc(100% - 32px));
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+      text-align: center;
+    }
+
+    .progress {
+      height: 10px;
+      background: #e5e7eb;
+      border-radius: 999px;
+      overflow: hidden;
+      margin-top: 16px;
+    }
+
+    .progress > div {
+      height: 100%;
+      width: 0;
+      background: var(--primary);
+      transition: width 0.25s;
+    }
   </style>
 </head>
+
 <body>
-<header>
-  <div class="logo">🖼️</div>
-  <div><h1>PDF → Fotos Excel</h1><p>Extraia imagens do PDF e insira nas colunas Foto_X do template</p></div>
-</header>
-<div class="container"
+  <header>
+    <h1>Exportador de Fotos para Excel</h1>
+    <p>Frontend e backend juntos em uma única aplicação FastAPI.</p>
+  </header>
 
->   <div class="backend-status" id="backendStatus"
+  <main>
+    <div class="grid"
 
->     <div class="dot" id="backendDot"></div>
-    <div><strong id="backendStatusText">Verificando servidor...</strong><span id="backendStatusSub"
+>       <section class="card"
 
-> — aguarde</span></div>
-  </div>
-  <div class="upload-grid"
+>         <h2>1. Template Excel</h2>
 
->     <div class="upload-zone" id="pdfDZ"
+        <div class="field"
 
->       <label for="pdfInput"><div class="uz-icon">📄</div><h2>Clique ou arraste o PDF</h2><p>Imagens extraídas automaticamente</p><div class="fn" id="pdfFN"></div></label>
-      <input type="file" id="pdfInput" accept=".pdf"/>
+>           <label>Arquivo Excel .xlsx</label>
+          <input id="excelFile" type="file" accept=".xlsx" />
+        </div>
+
+        <div class="field"
+
+>           <label>Aba</label>
+          <select id="sheetSelect" disabled></select>
+        </div>
+
+        <div class="field"
+
+>           <label>Linha do cabeçalho</label>
+          <input id="headerRow" type="number" min="1" value="1" />
+          <div class="small">No template enviado, aparentemente é a linha 1.</div>
+        </div>
+
+        <button id="btnAnalyze" type="button" disabled>Analisar Template</button>
+
+        <div id="templateStatus" class="status"></div>
+
+        <div id="photoColumnsBox" class="photo-columns" style="display:none;"></div>
+
+        <hr style="margin: 18px 0; border:0; border-top:1px solid #e5e7eb;" />
+
+        <h2>2. Imagens</h2>
+
+        <div class="field"
+
+>           <label>Selecionar imagens</label>
+          <input id="imageFiles" type="file" accept="image/*" multiple />
+        </div>
+
+        <div class="row"
+
+>           <div class="field"
+
+>             <label>Largura máxima</label>
+            <input id="imgWidth" type="number" value="130" min="30" />
+          </div>
+
+          <div class="field"
+
+>             <label>Altura máxima</label>
+            <input id="imgHeight" type="number" value="95" min="30" />
+          </div>
+        </div>
+
+        <div class="field"
+
+>           <label>
+            <input id="writeHeaders" type="checkbox" checked />
+            Escrever Foto_1, Foto_2 etc. no cabeçalho quando a coluna estiver vazia
+          </label>
+        </div>
+
+        <div class="actions"
+
+>           <button id="btnAuto" type="button" class="btn-secondary" disabled>Distribuir Automaticamente</button>
+          <button id="btnClear" type="button" class="btn-danger" disabled>Limpar Imagens</button>
+        </div>
+
+        <div class="actions"
+
+>           <button id="btnExport" type="button" disabled>Exportar Excel</button>
+        </div>
+      </section>
+
+      <section class="card"
+
+>         <h2>3. Mapeamento das Imagens</h2>
+        <p class="small"
+
+>           Escolha a coluna Foto_x e a linha em que cada imagem será inserida.
+        </p>
+
+        <div id="imageList" class="image-list"></div>
+      </section>
     </div>
-    <div class="upload-zone" id="excelDZ"
+  </main>
 
->       <label for="excelInput"><div class="uz-icon">📊</div><h2>Clique ou arraste o template Excel</h2><p>Detecta colunas Foto_X automaticamente</p><div class="fn" id="excelFN"></div></label>
-      <input type="file" id="excelInput" accept=".xlsx"/>
-    </div>
-  </div>
-  <div class="info-banner" id="infoBanner"><span>🎯</span><div id="infoBannerText"></div></div>
-  <div class="config-panel"
+  <div id="overlay" class="overlay"
 
->     <div class="field"><label>📋 Aba de destino</label><select id="sheetSelect" onchange="onSheetChange()"><option value="">Carregue o Excel</option></select></div>
-    <div class="field"><label>🔢 Linha do cabeçalho</label><input type="number" id="headerRowInput" value="1" min="1" max="50" onchange="onSheetChange()"/></div>
-    <div class="field"><label>📐 Escala PDF</label><select id="scaleSelect"><option value="1">1x</option><option value="1.5" selected>1.5x ✅</option><option value="2">2x</option><option value="3">3x</option></select></div>
-  </div>
-  <div class="adv-panel"
+>     <div class="modal"
 
->     <h4>⚙️ Opções</h4>
-    <div class="adv-grid"
+>       <h2 id="modalTitle">Processando...</h2>
+      <p id="modalText" class="small">Aguarde.</p>
+      <div class="progress"
 
->       <div class="field"><label>Tam. mínimo (px)</label><input type="number" id="minSize" value="40" min="5" max="300"/></div>
-      <div class="field"><label>Dedup (%)</label><input type="number" id="overlapThresh" value="85" min="0" max="100"/></div>
-      <div class="field"><label>Qualidade JPEG</label><input type="number" id="jpegQ" value="92" min="50" max="100"/></div>
-      <div class="field"><label>Margem recorte (px)</label><input type="number" id="cropPad" value="3" min="0" max="20"/></div>
-      <div class="toggle-row"><input type="checkbox" id="chkClean" checked/><label for="chkClean">🧹 Remover logos</label></div>
-      <div class="toggle-row"><input type="checkbox" id="chkDedup" checked/><label for="chkDedup">🔁 Dedup</label></div>
-      <div class="toggle-row"><input type="checkbox" id="chkFallback" checked/><label for="chkFallback">🛡️ Fallback</label></div>
-      <div class="toggle-row"><input type="checkbox" id="chkAutoAssign"/><label for="chkAutoAssign">⚡ Auto</label></div>
-    </div>
-  </div>
-  <button class="btn-extract" id="btnExtract" disabled onclick="extractImages()">🔍 Extrair Imagens do PDF</button>
-  <div class="progress-wrap" id="progressWrap"
-
->     <div class="prog-top"><span id="progText">Aguardando...</span><span id="progPct">0%</span></div>
-    <div class="prog-bg"><div class="prog-fill" id="progFill"></div></div>
-    <div class="sub-bg"><div class="sub-fill" id="subFill"></div></div>
-  </div>
-  <div class="log-box" id="logBox"></div>
-  <div class="ok-banner" id="okBanner"><div class="obi">✅</div><div><h4 id="okTitle">Excel gerado!</h4><p id="okDesc"></p></div></div>
-  <div class="stats-bar" id="statsBar"
-
->     <div class="stat-chip">📄 Páginas: <span class="sv" id="stPages">0</span></div>
-    <div class="stat-chip">🖼️ Extraídas: <span class="sv" id="stImgs">0</span></div>
-    <div class="stat-chip">✅ Sel: <span class="sv" id="stSel">0</span></div>
-    <div class="stat-chip">❌ Excl: <span class="sv" id="stRej">0</span></div>
-  </div>
-  <div class="assign-panel" id="assignPanel"
-
->     <div class="assign-header"
-
->       <h3>🗂️ Atribuição por Coluna Foto</h3>
-      <div class="assign-actions"
-
->         <button class="btn-sm btn-outline" onclick="clearAllAssignments()">🗑️ Limpar</button>
-        <button class="btn-sm btn-outline" onclick="autoAssignAll()">⚡ Auto</button>
-        <button class="btn-sm btn-green" id="btnExport" disabled onclick="exportExcel()">📥 Exportar Excel</button>
+>         <div id="progressBar"></div>
       </div>
     </div>
-    <div class="col-tabs" id="colTabs"></div>
-    <div class="assign-instr" id="assignInstr">Selecione uma coluna e clique nas fotos</div>
-    <div class="assign-grid" id="assignGrid"></div>
-    <div class="assign-summary" id="assignSummary"></div>
   </div>
-  <div id="gallerySection" style="display:none"
 
->     <div class="gallery-header">🖼️ Imagens Extraídas <span class="badge" id="totalBadge">0</span></div>
-    <div class="page-filters" id="pageFilters"></div>
-    <div class="sel-bar"
+  <script>
+    const $ = (id) => document.getElementById(id);
 
->       <button class="btn-sm btn-outline" onclick="selAll(true)">✅ Todas</button>
-      <button class="btn-sm btn-outline" onclick="selAll(false)">⬜ Nenhuma</button>
-      <button class="btn-sm btn-outline" onclick="selPage(true)">📄✅</button>
-      <button class="btn-sm btn-outline" onclick="selPage(false)">📄⬜</button>
-      <div class="sel-info"><span id="selCount">0</span>/<span id="totalCount">0</span></div>
-      <div class="spacer"></div>
-    </div>
-    <div class="gallery" id="gallery"></div>
-  </div>
-  <div class="empty" id="emptyState"><div class="ei">📂</div><p>Carregue um PDF e um template Excel para começar.</p></div>
-</div>
-<div class="modal-bg" id="modalBg"
+    let excelFile = null;
+    let sheetNames = [];
+    let photoColumns = [];
+    let images = [];
 
->   <div class="modal"
+    function setStatus(type, message) {
+      const box = $("templateStatus");
+      box.className = "status visible " + type;
+      box.textContent = message;
+    }
 
->     <div class="mi" id="mIcon">⚙️</div>
-    <h3 id="mTitle">Gerando Excel</h3>
-    <div class="ms" id="mSub">Aguarde...</div>
-    <div class="mpb"><div class="mpf" id="mPF"></div></div>
-    <div class="mlb" id="mLbl">Iniciando...</div>
-    <div class="mcnt" id="mCnt">0/0</div>
-  </div>
-</div>
-<div id="toast"></div>
-<script>
-pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-const $=id=>document.getElementById(id);
-const BACKEND='/api';
-let pdfFile=null,excelFile=null;
-let extractedImages=[],photoColumns=[],assignments={};
-let activeFilter='all',activeAssignCol=null,backendOnline=false;
-function toast(msg,type='info'){const t=$('toast');t.textContent=msg;t.className=`show ${type}`;clearTimeout(t._t);t._t=setTimeout(()=>t.className='',4200)}
-function log(msg,type='info'){const b=$('logBox');b.classList.add('visible');const d=document.createElement('div');d.className=`l${type}`;d.textContent=`[${new Date().toLocaleTimeString()}] ${msg}`;b.appendChild(d);b.scrollTop=b.scrollHeight}
-function setP(pct,lbl){$('progFill').style.width=pct+'%';$('progPct').textContent=pct+'%';$('progText').textContent=lbl}
-function setSub(pct){$('subFill').style.width=pct+'%'}
-function setM(pct,lbl,cnt){$('mPF').style.width=pct+'%';$('mLbl').textContent=lbl;$('mCnt').textContent=cnt}
-function yf(){return new Promise(r=>requestAnimationFrame(()=>setTimeout(r,0)))}
-function showBanner(msg,type='ok'){const b=$('infoBanner');b.className=`info-banner ${type} visible`;$('infoBannerText').innerHTML=msg}
-function hideBanner(){$('infoBanner').classList.remove('visible')}
-async function checkBackend(){
-  try{
-    const r=await fetch(BACKEND+'/',{signal:AbortSignal.timeout(5000)});
-    const d=await r.json();
-    if(r.ok&&d.status==='ok'){backendOnline=true;$('backendDot').classList.add('online');$('backendStatusText').textContent='Servidor online';$('backendStatusSub').textContent=' — pronto para exportar';}
-    else throw new Error();
-  }catch{backendOnline=false;$('backendDot').classList.remove('online');$('backendStatusText').textContent='Servidor offline';$('backendStatusSub').textContent=' — aguardando';}
-}
-checkBackend();setInterval(checkBackend,15000);
-$('pdfInput').addEventListener('change',function(){
-  if(!this.files[0])return;
-  if(!this.files[0].name.toLowerCase().endsWith('.pdf')){toast('⚠️ .pdf apenas','warn');return}
-  pdfFile=this.files[0];$('pdfFN').textContent='📄 '+pdfFile.name;$('pdfFN').classList.add('visible');checkReady();toast(`📄 ${pdfFile.name}`,'success');
-});
-$('excelInput').addEventListener('change',function(){if(this.files[0])loadExcelInfo(this.files[0])});
-['pdfDZ','excelDZ'].forEach(id=>{
-  const z=$(id);
-  z.addEventListener('dragover',e=>{e.preventDefault();e.stopPropagation();z.classList.add('drag-over')});
-  z.addEventListener('dragleave',e=>{e.stopPropagation();z.classList.remove('drag-over')});
-  z.addEventListener('drop',e=>{
-    e.preventDefault();e.stopPropagation();z.classList.remove('drag-over');
-    const f=e.dataTransfer.files[0];if(!f)return;
-    if(id==='pdfDZ'){if(!f.name.toLowerCase().endsWith('.pdf')){toast('⚠️ .pdf','warn');return}pdfFile=f;$('pdfFN').textContent='📄 '+f.name;$('pdfFN').classList.add('visible');checkReady();toast(`📄 ${f.name}`,'success');}
-    else{if(!f.name.toLowerCase().endsWith('.xlsx')){toast('⚠️ .xlsx','warn');return}loadExcelInfo(f);}
-  });
-});
-async function loadExcelInfo(f){
-  excelFile=f;$('excelFN').textContent='📊 '+f.name;$('excelFN').classList.add('visible');checkReady();toast(`📊 ${f.name}`,'success');
-  if(!backendOnline){showBanner('⚠️ Servidor offline.','warn');return}
-  try{
-    const fd=new FormData();fd.append('template',f);
-    const r=await fetch(BACKEND+'/info-abas',{method:'POST',body:fd});
-    const d=await r.json();
-    const sel=$('sheetSelect');sel.innerHTML='';
-    (d.sheets||[]).forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;sel.appendChild(o)});
-    log(`Excel: ${(d.sheets||[]).length} aba(s)`,'ok');await loadPhotoColumns();
-  }catch(err){showBanner(`❌ ${err.message}`,'err')}
-}
-async function onSheetChange(){await loadPhotoColumns()}
-async function loadPhotoColumns(){
-  const sn=$('sheetSelect').value,hr=parseInt($('headerRowInput').value)||1;
-  hideBanner();photoColumns=[];assignments={};
-  if(!excelFile||!sn)return;
-  if(!backendOnline){showBanner('⚠️ Servidor offline.','warn');return}
-  try{
-    const fd=new FormData();fd.append('template',excelFile);fd.append('sheet_name',sn);fd.append('header_row',String(hr));
-    const r=await fetch(BACKEND+'/info-colunas',{method:'POST',body:fd});
-    const d=await r.json();
-    if(d.error){showBanner(`❌ ${d.error}`,'err');return}
-    photoColumns=(d.columns||[]).map(c=>({name:c.name,colNum:c.col,letter:idxToCol(c.col)}));
-    photoColumns.forEach(c=>{assignments[c.colNum]=[]});
-    if(!photoColumns.length){showBanner('⚠️ Nenhuma coluna Foto_X.','warn');return}
-    const preview=photoColumns.slice(0,6).map(c=>`<strong>${c.name}</strong>(${c.letter})`).join(' ');
-    const more=photoColumns.length>6?` +${photoColumns.length-6}`:'';
-    showBanner(`✅ <strong>${photoColumns.length}</strong> coluna(s): ${preview}${more}`,'ok');
-    log(`Colunas: ${photoColumns.map(c=>c.name).join(', ')}`,'ok');
-    if(extractedImages.length>0)buildAssignPanel();
-  }catch(err){showBanner(`❌ ${err.message}`,'err')}
-}
-function checkReady(){$('btnExtract').disabled=!(pdfFile&&excelFile)}
-async function extractImages(){
-  if(!pdfFile)return;
-  extractedImages=[];assignments={};photoColumns.forEach(c=>{assignments[c.colNum]=[]});
-  $('gallery').innerHTML='';$('logBox').innerHTML='';$('logBox').classList.remove('visible');
-  $('gallerySection').style.display='none';$('assignPanel').classList.remove('visible');
-  $('emptyState').style.display='none';$('statsBar').classList.remove('visible');
-  $('okBanner').classList.remove('visible');$('pageFilters').innerHTML='';activeFilter='all';
-  const pw=$('progressWrap');pw.classList.add('visible');setP(0,'Carregando PDF...');setSub(0);
-  const scale=parseFloat($('scaleSelect').value)||1.5;
-  const minSize=parseInt($('minSize').value)||40;
-  const overlapT=parseInt($('overlapThresh').value)||85;
-  const jpegQ=(parseInt($('jpegQ').value)||92)/100;
-  const cropPad=parseInt($('cropPad').value)||3;
-  const doDedup=$('chkDedup').checked,doFallback=$('chkFallback').checked;
-  try{
-    const buf=await pdfFile.arrayBuffer();
-    const pdf=await pdfjsLib.getDocument({data:buf}).promise;
-    const total=pdf.numPages;log(`PDF: ${total} páginas`,'ok');
-    for(let p=1;p<=total;p++){
-      setP(Math.round(((p-1)/total)*95),`Página ${p}/${total}...`);setSub(0);await yf();
-      const page=await pdf.getPage(p);const vp=page.getViewport({scale});
-      const canvas=document.createElement('canvas');canvas.width=Math.round(vp.width);canvas.height=Math.round(vp.height);
-      await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
-      setSub(40);const ops=await page.getOperatorList();
-      const regions=detectRegions(ops,page,vp);const unique=doDedup?dedup(regions,overlapT/100):regions;
-      setSub(70);let cnt=0;
-      for(const reg of unique){
-        const x0=Math.max(0,Math.round(reg.x)-cropPad),y0=Math.max(0,Math.round(reg.y)-cropPad);
-        const x1=Math.min(canvas.width,Math.round(reg.x+reg.w)+cropPad),y1=Math.min(canvas.height,Math.round(reg.y+reg.h)+cropPad);
-        const cw=x1-x0,ch=y1-y0;if(cw<minSize||ch<minSize)continue;
-        const crop=document.createElement('canvas');crop.width=cw;crop.height=ch;
-        crop.getContext('2d').drawImage(canvas,x0,y0,cw,ch,0,0,cw,ch);
-        cnt++;extractedImages.push({dataUrl:crop.toDataURL('image/jpeg',jpegQ),w:cw,h:ch,page:p,seq:cnt,idx:extractedImages.length,selected:true});
+    function showModal(title, text, percent) {
+      $("overlay").classList.add("visible");
+      $("modalTitle").textContent = title;
+      $("modalText").textContent = text;
+      $("progressBar").style.width = percent + "%";
+    }
+
+    function hideModal() {
+      $("overlay").classList.remove("visible");
+    }
+
+    function startRow() {
+      const headerRow = parseInt($("headerRow").value || "1", 10);
+      return headerRow + 1;
+    }
+
+    function escapeHtml(text) {
+      return String(text || "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function getColumnOptions(selectedCol) {
+      return photoColumns.map(col => {
+        const selected = String(col.col) === String(selectedCol) ? "selected" : "";
+        return `<option value="${col.col}" ${selected}>${escapeHtml(col.name)} - coluna ${col.letter}</option>`;
+      }).join("");
+    }
+
+    function updateButtons() {
+      $("btnExport").disabled = !(excelFile && images.length > 0 && photoColumns.length > 0);
+      $("btnAuto").disabled = !(images.length > 0 && photoColumns.length > 0);
+      $("btnClear").disabled = images.length === 0;
+    }
+
+    function renderPhotoColumns() {
+      const box = $("photoColumnsBox");
+
+      if (!photoColumns.length) {
+        box.style.display = "none";
+        box.innerHTML = "";
+        return;
       }
-      if(cnt===0&&doFallback){log(`P${p}: fallback`,'warn');extractedImages.push({dataUrl:canvas.toDataURL('image/jpeg',jpegQ),w:canvas.width,h:canvas.height,page:p,seq:1,idx:extractedImages.length,selected:true});cnt=1;}
-      setSub(100);log(`P${p}: ${cnt} foto(s)`,'ok');
-    }
-    setP(100,'Concluído!');setTimeout(()=>pw.classList.remove('visible'),900);
-    if(!extractedImages.length){toast('⚠️ Nenhuma imagem.','warn');$('emptyState').style.display='block';return}
-    extractedImages=cleanImages(extractedImages);extractedImages.forEach((img,i)=>img.idx=i);
-    if(!extractedImages.length){toast('⚠️ Todas removidas.','warn');$('emptyState').style.display='block';return}
-    if($('chkAutoAssign').checked&&photoColumns.length>0)autoAssignAll();
-    buildGallery();buildAssignPanel();toast(`✅ ${extractedImages.length} imagens!`,'success');
-  }catch(err){pw.classList.remove('visible');toast('❌ '+err.message,'error');log('ERRO: '+err.message,'err');console.error(err)}
-}
-function detectRegions(ops,page,vp){
-  const regions=[],stack=[];let ctm=[1,0,0,1,0,0];const OPS=pdfjsLib.OPS;
-  for(let i=0;i<ops.fnArray.length;i++){
-    const fn=ops.fnArray[i],args=ops.argsArray[i];
-    switch(fn){
-      case OPS.save:stack.push([...ctm]);break;
-      case OPS.restore:if(stack.length)ctm=stack.pop();break;
-      case OPS.transform:ctm=mm(ctm,args);break;
-      case OPS.paintFormXObjectBegin:stack.push([...ctm]);if(args&&args[1])ctm=mm(ctm,args[1]);break;
-      case OPS.paintFormXObjectEnd:if(stack.length)ctm=stack.pop();break;
-      case OPS.paintImageXObject:case OPS.paintJpegXObject:case OPS.paintImageMaskXObject:regions.push(bbox(ctm,page,vp));break;
-    }
-  }
-  return regions;
-}
-function bbox(ctm,page,vp){
-  const pts=[[0,0],[1,0],[1,1],[0,1]].map(([px,py])=>{const ux=ctm[0]*px+ctm[2]*py+ctm[4],uy=ctm[1]*px+ctm[3]*py+ctm[5];return vp.convertToViewportPoint(ux,uy)});
-  const xs=pts.map(p=>p[0]),ys=pts.map(p=>p[1]);
-  return{x:Math.min(...xs),y:Math.min(...ys),w:Math.max(...xs)-Math.min(...xs),h:Math.max(...ys)-Math.min(...ys)};
-}
-function mm(a,b){return[a[0]*b[0]+a[2]*b[1],a[1]*b[0]+a[3]*b[1],a[0]*b[2]+a[2]*b[3],a[1]*b[2]+a[3]*b[3],a[0]*b[4]+a[2]*b[5]+a[4],a[1]*b[4]+a[3]*b[5]+a[5]]}
-function dedup(r,t){const k=[];for(const x of r){if(!k.some(y=>iou(y,x)>=t))k.push(x)}return k}
-function iou(a,b){const x0=Math.max(a.x,b.x),y0=Math.max(a.y,b.y),x1=Math.min(a.x+a.w,b.x+b.w),y1=Math.min(a.y+a.h,b.y+b.h);const i=Math.max(0,x1-x0)*Math.max(0,y1-y0);if(!i)return 0;return i/(a.w*a.h+b.w*b.h-i)}
-function cleanImages(images){
-  if(!$('chkClean').checked)return images;
-  const areas=images.map(i=>i.w*i.h).sort((a,b)=>a-b);
-  const med=areas[Math.floor(areas.length/2)]||0;const minA=Math.max(6000,med*0.15);const out=[];
-  for(const img of images){const a=img.w*img.h,r=img.w/img.h;if(img.w<80||img.h<80||a<minA||r>6||r<0.16)continue;out.push(img)}
-  const rm=images.length-out.length;if(rm>0)log(`Filtro: ${rm} removido(s)`,'warn');return out;
-}
-function buildAssignPanel(){
-  if(!photoColumns.length)return;
-  $('assignPanel').classList.add('visible');buildColTabs();
-  if(!activeAssignCol||!photoColumns.find(c=>c.colNum===activeAssignCol))activeAssignCol=photoColumns[0].colNum;
-  renderAssignGrid();updateAssignSummary();
-}
-function buildColTabs(){
-  const tabs=$('colTabs');tabs.innerHTML='';
-  photoColumns.forEach(col=>{
-    const cnt=(assignments[col.colNum]||[]).length;
-    const btn=document.createElement('button');
-    btn.className='col-tab'+(col.colNum===activeAssignCol?' active':'')+(cnt>0?' has-photos':'');
-    btn.textContent=`${col.name}(${cnt})`;btn.dataset.cn=col.colNum;
-    btn.onclick=()=>selectAssignCol(col.colNum);tabs.appendChild(btn);
-  });
-}
-function selectAssignCol(colNum){
-  activeAssignCol=colNum;
-  document.querySelectorAll('.col-tab').forEach(t=>t.classList.toggle('active',parseInt(t.dataset.cn)===colNum));
-  const col=photoColumns.find(c=>c.colNum===colNum);
-  $('assignInstr').textContent=`Atribuindo para ${col?col.name:'?'}. Clique para atribuir/remover.`;
-  renderAssignGrid();
-}
-function renderAssignGrid(){
-  const grid=$('assignGrid');grid.innerHTML='';
-  const selImgs=extractedImages.filter(i=>i.selected);
-  if(!selImgs.length){grid.innerHTML='<div style="color:#475569;font-size:.8rem;grid-column:1/-1;padding:16px">Selecione imagens na galeria</div>';return}
-  selImgs.forEach(img=>{
-    const ac=findAssignedCol(img.idx);const card=document.createElement('div');
-    card.className='assign-card'+(ac!==null?' assigned':'');card.dataset.idx=img.idx;
-    const cd=ac!==null?photoColumns.find(c=>c.colNum===ac):null;
-    const pos=cd?(assignments[cd.colNum].indexOf(img.idx)+1):0;
-    card.innerHTML=`<div class="ac-thumb"><img src="${img.dataUrl}" loading="lazy"/></div>`+
-      `<div class="ac-col-tag" style="${cd?`background:${colColor(ac)}`:''}"
 
-> ${cd?cd.name:''}${pos>0?` #${pos}`:''}</div>`+
-      `<div class="ac-foot"><span class="ac-idx">#${img.idx+1}</span><span class="ac-pg">P${img.page}</span></div>`;
-    card.onclick=()=>toggleAssign(img.idx);grid.appendChild(card);
-  });
-}
-function colColor(colNum){const c=['#6366f1','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#84cc16','#f97316'];return c[photoColumns.findIndex(x=>x.colNum===colNum)%c.length]||'#6366f1'}
-function findAssignedCol(i){for(const col of photoColumns){if((assignments[col.colNum]||[]).includes(i))return col.colNum}return null}
-function toggleAssign(imgIdx){
-  const cur=findAssignedCol(imgIdx);
-  if(cur===activeAssignCol){assignments[activeAssignCol]=assignments[activeAssignCol].filter(i=>i!==imgIdx)}
-  else{if(cur!==null)assignments[cur]=assignments[cur].filter(i=>i!==imgIdx);assignments[activeAssignCol]=[...(assignments[activeAssignCol]||[]),imgIdx]}
-  buildColTabs();renderAssignGrid();updateAssignSummary();updateExportBtn();
-}
-function updateAssignSummary(){
-  const sum=$('assignSummary');sum.innerHTML='';let total=0;
-  photoColumns.forEach(col=>{const cnt=(assignments[col.colNum]||[]).length;total+=cnt;const chip=document.createElement('div');chip.className='sum-chip';chip.innerHTML=`<strong style="color:${colColor(col.colNum)}">${col.name}</strong>: ${cnt}`;sum.appendChild(chip)});
-  const ua=extractedImages.filter(x=>x.selected).length-total;
-  if(ua>0){const chip=document.createElement('div');chip.className='sum-chip';chip.style.borderColor='#f59e0b';chip.innerHTML=`⚠️ <strong style="color:#f59e0b">${ua}</strong> não atribuída(s)`;sum.appendChild(chip)}
-}
-function updateExportBtn(){$('btnExport').disabled=Object.values(assignments).reduce((s,a)=>s+a.length,0)===0}
-function clearAllAssignments(){photoColumns.forEach(c=>{assignments[c.colNum]=[]});buildColTabs();renderAssignGrid();updateAssignSummary();updateExportBtn()}
-function autoAssignAll(){
-  if(!photoColumns.length){toast('⚠️ Sem colunas.','warn');return}
-  photoColumns.forEach(c=>{assignments[c.colNum]=[]});
-  const si=extractedImages.filter(i=>i.selected);const nc=photoColumns.length;
-  si.forEach((img,i)=>{assignments[photoColumns[i%nc].colNum].push(img.idx)});
-  buildColTabs();renderAssignGrid();updateAssignSummary();updateExportBtn();
-  toast(`⚡ ${si.length} distribuídas!`,'success');
-}
-function buildGallery(){
-  const g=$('gallery');g.innerHTML='';buildFilters();
-  extractedImages.forEach((img,i)=>addCard(img,i,g));
-  $('gallerySection').style.display='block';
-  $('totalBadge').textContent=extractedImages.length;$('totalCount').textContent=extractedImages.length;
-  updateStats();applyFilter('all');
-}
-function addCard(img,i,g){
-  const c=document.createElement('div');
-  c.className=`img-card ${img.selected?'selected':'rejected'}`;c.dataset.idx=i;c.dataset.page=img.page;
-  c.innerHTML=`<div class="thumb"><img src="${img.dataUrl}" loading="lazy"/><div class="chk">${img.selected?'✓':'✕'}</div>`+
-    `<div class="sq-badge">${img.seq}ª</div><div class="pg-badge">Pág. ${img.page}</div></div>`+
-    `<div class="card-foot"><span class="ci">#${i+1}</span><span class="cs">${img.w}×${img.h}</span></div>`+
-    `<div class="card-acts"><button class="mb ok">✅</button><button class="mb no">❌</button></div>`;
-  c.querySelector('.thumb').addEventListener('click',()=>toggle(i));
-  c.querySelector('.mb.ok').addEventListener('click',e=>{e.stopPropagation();setState(i,true)});
-  c.querySelector('.mb.no').addEventListener('click',e=>{e.stopPropagation();setState(i,false)});
-  g.appendChild(c);
-}
-function buildFilters(){
-  const pages=[...new Set(extractedImages.map(x=>x.page))].sort((a,b)=>a-b);
-  const pf=$('pageFilters');pf.innerHTML='';
-  mkBtn('all',`Todas(${extractedImages.length})`,pf);
-  pages.forEach(p=>mkBtn(p,`P${p}(${extractedImages.filter(x=>x.page===p).length})`,pf));
-}
-function mkBtn(page,label,container){const b=document.createElement('button');b.className='pf-btn'+(page==='all'?' active':'');b.textContent=label;b.dataset.page=String(page);b.onclick=()=>applyFilter(page);container.appendChild(b)}
-function applyFilter(page){activeFilter=page;document.querySelectorAll('.pf-btn').forEach(b=>b.classList.toggle('active',String(b.dataset.page)===String(page)));document.querySelectorAll('.img-card').forEach(c=>{c.style.display=(page==='all'||parseInt(c.dataset.page)===parseInt(page))?'':'none'})}
-function selPage(v){extractedImages.forEach((img,i)=>{if(activeFilter==='all'||img.page===parseInt(activeFilter))setState(i,v)})}
-function selAll(v){extractedImages.forEach((_,i)=>setState(i,v))}
-function toggle(i){extractedImages[i].selected=!extractedImages[i].selected;refresh(i);updateStats()}
-function setState(i,v){
-  extractedImages[i].selected=v;
-  if(!v){photoColumns.forEach(c=>{assignments[c.colNum]=(assignments[c.colNum]||[]).filter(x=>x!==i)});buildColTabs();updateAssignSummary();updateExportBtn()}
-  refresh(i);updateStats();if($('assignPanel').classList.contains('visible'))renderAssignGrid();
-}
-function refresh(i){const c=document.querySelector(`.img-card[data-idx="${i}"]`);if(!c)return;const img=extractedImages[i];c.className=`img-card ${img.selected?'selected':'rejected'}`;c.querySelector('.chk').textContent=img.selected?'✓':'✕'}
-function updateStats(){
-  const sel=extractedImages.filter(x=>x.selected).length;
-  $('selCount').textContent=sel;$('stPages').textContent=new Set(extractedImages.map(x=>x.page)).size;
-  $('stImgs').textContent=extractedImages.length;$('stSel').textContent=sel;
-  $('stRej').textContent=extractedImages.length-sel;$('statsBar').classList.add('visible');
-}
-async function exportExcel(){
-  const totalA=Object.values(assignments).reduce((s,a)=>s+a.length,0);
-  if(!totalA){toast('⚠️ Atribua fotos.','warn');return}
-  if(!excelFile){toast('⚠️ Carregue o template.','warn');return}
-  if(!backendOnline){toast('❌ Servidor offline.','error');return}
-  const sheetName=$('sheetSelect').value,headerRow=parseInt($('headerRowInput').value)||1;
-  if(!sheetName){toast('⚠️ Escolha a aba.','warn');return}
-  const modal=$('modalBg');modal.classList.add('visible');
-  $('mIcon').textContent='⚙️';$('mTitle').textContent='Enviando para o servidor';
-  $('mSub').textContent=`${totalA} fotos`;setM(0,'Preparando...','');await yf();
-  try{
-    const formData=new FormData();
-    formData.append('template',excelFile);
-    formData.append('sheet_name',sheetName);
-    formData.append('header_row',String(headerRow));
-    const allAssigned=[...new Set(Object.values(assignments).flat())];
-    const assignByName={};
-    for(let k=0;k<allAssigned.length;k++){
-      const imgIdx=allAssigned[k];const img=extractedImages[imgIdx];const fname=`foto_${imgIdx}.jpg`;
-      formData.append('images',dataUrlToBlob(img.dataUrl),fname);
-      setM(Math.round((k/allAssigned.length)*30),`Preparando ${k+1}/${allAssigned.length}`,`${k+1}/${allAssigned.length}`);
-      if(k%5===0)await yf();
+      box.style.display = "block";
+      box.innerHTML = `
+        <strong>Colunas de fotos detectadas:</strong><br/>
+        ${photoColumns.map(col => `
+          <span class="badge">${escapeHtml(col.name)} = ${col.letter}</span>
+        `).join("")}
+      `;
     }
-    for(const col of photoColumns){const assigned=assignments[col.colNum]||[];if(assigned.length>0)assignByName[col.name]=assigned.map(idx=>`foto_${idx}.jpg`);}
-    formData.append('assignments',JSON.stringify(assignByName));
-    setM(35,'Enviando...','');await yf();
-    const response=await fetch(BACKEND+'/gerar-excel',{method:'POST',body:formData});
-    setM(90,'Recebendo...','');await yf();
-    const ct=response.headers.get('content-type')||'';
-    if(ct.includes('json')){const err=await response.json();throw new Error(err.error||`HTTP ${response.status}`)}
-    if(!response.ok)throw new Error(`HTTP ${response.status}`);
-    const blob=await response.blob();
-    setM(100,'Concluído!',`${totalA} fotos`);$('mIcon').textContent='✅';$('mTitle').textContent='Excel Gerado!';
-    await yf();setTimeout(()=>modal.classList.remove('visible'),1300);
-    const url=URL.createObjectURL(blob);const a=document.createElement('a');
-    a.href=url;a.download=(excelFile.name.replace(/\.xlsx$/i,'')||'template')+'_com_fotos.xlsx';
-    document.body.appendChild(a);a.click();document.body.removeChild(a);setTimeout(()=>URL.revokeObjectURL(url),8000);
-    $('okTitle').textContent=`✅ ${totalA} fotos inseridas!`;
-    $('okDesc').textContent=`Aba "${sheetName}" • Template preservado`;
-    $('okBanner').classList.add('visible');toast(`✅ ${totalA} fotos!`,'success');
-    log(`OK: ${totalA} fotos → "${sheetName}"`,'ok');
-  }catch(err){modal.classList.remove('visible');toast('❌ '+err.message,'error');log('ERRO: '+err.message,'err');console.error(err)}
-}
-function dataUrlToBlob(dataUrl){
-  const parts=dataUrl.split(',');const mime=parts[0].match(/:(.*?);/)[1];
-  const bin=atob(parts[1]);const arr=new Uint8Array(bin.length);
-  for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);return new Blob([arr],{type:mime});
-}
-function idxToCol(num){let c='';while(num>0){const m=(num-1)%26;c=String.fromCharCode(65+m)+c;num=Math.floor((num-m)/26)}return c}
-</script>
+
+    function renderImages() {
+      const list = $("imageList");
+
+      if (!images.length) {
+        list.innerHTML = `
+          <div class="small"
+
+>             Nenhuma imagem selecionada ainda.
+          </div>
+        `;
+        updateButtons();
+        return;
+      }
+
+      list.innerHTML = images.map((img, idx) => `
+        <div class="image-card"
+
+>           <img src="${img.dataUrl}" alt="${escapeHtml(img.name)}" />
+
+          <div class="name">${escapeHtml(img.name)}</div>
+          <div class="meta">${img.width} x ${img.height}px</div>
+
+          <div class="field"
+
+>             <label>Coluna de destino</label>
+            <select data-idx="${idx}" class="colSelect"
+
+>               ${getColumnOptions(img.col)}
+            </select>
+          </div>
+
+          <div class="field"
+
+>             <label>Linha de destino</label>
+            <input data-idx="${idx}" class="rowInput" type="number" min="1" value="${img.row}" />
+          </div>
+
+          <button type="button" class="btn-danger removeBtn" data-idx="${idx}"
+
+>             Remover
+          </button>
+        </div>
+      `).join("");
+
+      document.querySelectorAll(".colSelect").forEach(el => {
+        el.addEventListener("change", () => {
+          const idx = parseInt(el.dataset.idx, 10);
+          images[idx].col = parseInt(el.value, 10);
+        });
+      });
+
+      document.querySelectorAll(".rowInput").forEach(el => {
+        el.addEventListener("change", () => {
+          const idx = parseInt(el.dataset.idx, 10);
+          images[idx].row = parseInt(el.value || startRow(), 10);
+        });
+      });
+
+      document.querySelectorAll(".removeBtn").forEach(el => {
+        el.addEventListener("click", () => {
+          const idx = parseInt(el.dataset.idx, 10);
+          images.splice(idx, 1);
+          renderImages();
+        });
+      });
+
+      updateButtons();
+    }
+
+    async function analyzeTemplate() {
+      if (!excelFile) {
+        setStatus("warn", "Selecione um arquivo Excel primeiro.");
+        return;
+      }
+
+      showModal("Analisando template", "Lendo abas e colunas do Excel...", 30);
+
+      try {
+        const fd = new FormData();
+        fd.append("template", excelFile);
+        fd.append("header_row", $("headerRow").value || "1");
+
+        if ($("sheetSelect").value) {
+          fd.append("sheet_name", $("sheetSelect").value);
+        }
+
+        const res = await fetch("/api/template-info", {
+          method: "POST",
+          body: fd
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          throw new Error(data.error || "Erro ao analisar template.");
+        }
+
+        sheetNames = data.sheets || [];
+
+        const currentValue = $("sheetSelect").value;
+
+        $("sheetSelect").innerHTML = sheetNames.map(name => {
+          const selected = name === data.selected_sheet ? "selected" : "";
+          return `<option value="${escapeHtml(name)}" ${selected}>${escapeHtml(name)}</option>`;
+        }).join("");
+
+        $("sheetSelect").disabled = sheetNames.length === 0;
+
+        if (currentValue && sheetNames.includes(currentValue)) {
+          $("sheetSelect").value = currentValue;
+        } else {
+          $("sheetSelect").value = data.selected_sheet;
+        }
+
+        photoColumns = data.photo_columns || [];
+
+        renderPhotoColumns();
+
+        if (data.mode === "explicit") {
+          setStatus("success", data.message);
+        } else {
+          setStatus("warn", data.message);
+        }
+
+        autoDistribute(false);
+        renderImages();
+
+      } catch (err) {
+        setStatus("error", err.message);
+      } finally {
+        hideModal();
+      }
+    }
+
+    function autoDistribute(showMessage = true) {
+      if (!photoColumns.length || !images.length) {
+        return;
+      }
+
+      const firstRow = startRow();
+      const colCount = photoColumns.length;
+
+      images.forEach((img, idx) => {
+        const colIndex = idx % colCount;
+        const rowOffset = Math.floor(idx / colCount);
+
+        img.col = photoColumns[colIndex].col;
+        img.row = firstRow + rowOffset;
+      });
+
+      renderImages();
+
+      if (showMessage) {
+        setStatus("info", "Imagens distribuídas automaticamente nas colunas Foto_x.");
+      }
+    }
+
+    async function resizeImageFile(file, maxSize = 1600, quality = 0.88) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+
+        reader.onload = () => {
+          const img = new Image();
+
+          img.onload = () => {
+            let width = img.width;
+            let height = img.height;
+
+            if (width > maxSize || height > maxSize) {
+              const scale = Math.min(maxSize / width, maxSize / height);
+              width = Math.round(width * scale);
+              height = Math.round(height * scale);
+            }
+
+            const canvas = document.createElement("canvas");
+            canvas.width = width;
+            canvas.height = height;
+
+            const ctx = canvas.getContext("2d");
+            ctx.drawImage(img, 0, 0, width, height);
+
+            const dataUrl = canvas.toDataURL("image/jpeg", quality);
+
+            resolve({
+              name: file.name,
+              dataUrl,
+              width,
+              height
+            });
+          };
+
+          img.onerror = reject;
+          img.src = reader.result;
+        };
+
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function handleImagesSelected(files) {
+      if (!files || !files.length) {
+        return;
+      }
+
+      showModal("Carregando imagens", "Preparando imagens para exportação...", 20);
+
+      try {
+        const fileArray = Array.from(files);
+
+        for (let i = 0; i < fileArray.length; i++) {
+          const prepared = await resizeImageFile(fileArray[i]);
+          images.push({
+            ...prepared,
+            col: photoColumns[0] ? photoColumns[0].col : null,
+            row: startRow()
+          });
+
+          const percent = 20 + Math.round(((i + 1) / fileArray.length) * 70);
+          showModal("Carregando imagens", `Imagem ${i + 1} de ${fileArray.length}`, percent);
+        }
+
+        autoDistribute(false);
+        renderImages();
+
+      } catch (err) {
+        setStatus("error", "Erro ao carregar imagem: " + err.message);
+      } finally {
+        hideModal();
+      }
+    }
+
+    async function exportExcel() {
+      if (!excelFile) {
+        setStatus("warn", "Selecione o template Excel.");
+        return;
+      }
+
+      if (!images.length) {
+        setStatus("warn", "Selecione pelo menos uma imagem.");
+        return;
+      }
+
+      if (!photoColumns.length) {
+        setStatus("warn", "Nenhuma coluna de foto foi detectada.");
+        return;
+      }
+
+      showModal("Exportando Excel", "Enviando dados para o backend...", 20);
+
+      try {
+        const assignments = images.map(img => ({
+          name: img.name,
+          image: img.dataUrl,
+          col: img.col,
+          row: img.row
+        }));
+
+        const fd = new FormData();
+        fd.append("template", excelFile);
+        fd.append("sheet_name", $("sheetSelect").value);
+        fd.append("header_row", $("headerRow").value || "1");
+        fd.append("photo_columns", JSON.stringify(photoColumns));
+        fd.append("assignments", JSON.stringify(assignments));
+        fd.append("write_headers", $("writeHeaders").checked ? "true" : "false");
+        fd.append("img_width", $("imgWidth").value || "130");
+        fd.append("img_height", $("imgHeight").value || "95");
+
+        showModal("Exportando Excel", "Inserindo imagens no arquivo...", 55);
+
+        const res = await fetch("/api/exportar", {
+          method: "POST",
+          body: fd
+        });
+
+        if (!res.ok) {
+          let msg = "Erro ao exportar Excel.";
+
+          try {
+            const err = await res.json();
+            msg = err.error || msg;
+          } catch (_) {}
+
+          throw new Error(msg);
+        }
+
+        showModal("Exportando Excel", "Baixando arquivo final...", 85);
+
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "resultado_fotos.xlsx";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+
+        URL.revokeObjectURL(url);
+
+        showModal("Concluído", "Arquivo exportado com sucesso.", 100);
+
+        setTimeout(() => {
+          hideModal();
+          setStatus("success", "Excel exportado com sucesso.");
+        }, 800);
+
+      } catch (err) {
+        hideModal();
+        setStatus("error", err.message);
+      }
+    }
+
+    $("excelFile").addEventListener("change", async (event) => {
+      excelFile = event.target.files[0] || null;
+      $("btnAnalyze").disabled = !excelFile;
+
+      if (excelFile) {
+        await analyzeTemplate();
+      }
+    });
+
+    $("btnAnalyze").addEventListener("click", analyzeTemplate);
+
+    $("sheetSelect").addEventListener("change", analyzeTemplate);
+
+    $("headerRow").addEventListener("change", analyzeTemplate);
+
+    $("imageFiles").addEventListener("change", async (event) => {
+      await handleImagesSelected(event.target.files);
+      event.target.value = "";
+    });
+
+    $("btnAuto").addEventListener("click", () => autoDistribute(true));
+
+    $("btnClear").addEventListener("click", () => {
+      images = [];
+      renderImages();
+      setStatus("info", "Imagens removidas.");
+    });
+
+    $("btnExport").addEventListener("click", exportExcel);
+
+    renderImages();
+  </script>
 </body>
-</html>"""
+</html>
+"""
 
 
-def norm(v):
-    return str(v or '').strip().lower()
+# ============================================================
+# Rotas
+# ============================================================
+
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    return HTMLResponse(INDEX_HTML)
 
 
-def find_photo_columns(ws, header_row=1):
-    cols = []
-    row  = ws[header_row]
-    for cell in row:
-        if cell.value and norm(cell.value).startswith('foto_'):
-            try:
-                int(norm(cell.value).replace('foto_', ''))
-                cols.append({'name': str(cell.value).strip(), 'col': cell.column})
-            except Exception:
-                pass
-    if cols:
-        cols.sort(key=lambda x: x['col'])
-        return cols
-    anchor = None
-    for cell in row:
-        if 'tipo de quantitativo' in norm(cell.value or ''):
-            anchor = cell.column
-            break
-    start = (anchor + 1) if anchor else 15
-    for i, col in enumerate(range(start, ws.max_column + 1), 1):
-        cols.append({'name': f'Foto_{i}', 'col': col})
-    return cols
+@app.get("/api/health")
+async def health():
+    return {
+        "status": "ok",
+        "app": "Exportador de Fotos para Excel"
+    }
 
 
-@app.get("/")
-def root():
-    return HTMLResponse(content=HTML)
-
-
-@app.get("/api/")
-def api_root():
-    return {"status": "ok", "message": "PDF → Fotos Excel API"}
-
-
-@app.post("/api/info-abas")
-async def info_abas(template: UploadFile = File(...)):
-    try:
-        data = await template.read()
-        
-
-# ── keep_vba=True preserva macros/VBA e evita XML inválido ──
-        wb   = load_workbook(io.BytesIO(data), read_only=True, keep_vba=True)
-        return {"sheets": wb.sheetnames}
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@app.post("/api/info-colunas")
-async def info_colunas(
-    template:   UploadFile = File(...),
-    sheet_name: str        = Form(...),
-    header_row: int        = Form(1)
+@app.post("/api/template-info")
+async def template_info(
+    template: UploadFile = File(...),
+    header_row: int = Form(1),
+    sheet_name: Optional[str] = Form(None)
 ):
-    try:
-        data = await template.read()
-        wb   = load_workbook(io.BytesIO(data), keep_vba=True)
-        if sheet_name not in wb.sheetnames:
-            return {"error": f"Aba '{sheet_name}' não encontrada", "columns": []}
-        ws   = wb[sheet_name]
-        cols = find_photo_columns(ws, header_row)
-        return {"columns": cols}
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@app.post("/api/gerar-excel")
-async def gerar_excel(
-    template:    UploadFile       = File(...),
-    images:      List[UploadFile] = File(...),
-    assignments: str              = Form(...),
-    sheet_name:  str              = Form(...),
-    header_row:  int              = Form(1)
-):
-    tmp         = tempfile.mkdtemp()
-    output_path = os.path.join(tmp, f"out_{uuid.uuid4().hex}.xlsx")
+    """
+    Lê o template Excel e retorna:
+    - abas disponíveis
+    - aba selecionada
+    - colunas Foto_x detectadas
+    """
 
     try:
-        
+        filename = template.filename or ""
 
-# ── Salvar template em disco ──────────────────────
-        tpl_path = os.path.join(tmp, "template.xlsx")
-        tpl_bytes = await template.read()
-        with open(tpl_path, "wb") as f:
-            f.write(tpl_bytes)
-
-        
-
-# ── Salvar imagens ────────────────────────────────
-        img_map = {}
-        for up in images:
-            raw      = await up.read()
-            img_path = os.path.join(tmp, up.filename)
-            with open(img_path, "wb") as f:
-                f.write(raw)
-            img_map[up.filename] = img_path
-
-        print(f"[DEBUG] Imagens recebidas: {list(img_map.keys())}")
-
-        
-
-# ── Abrir workbook preservando estrutura ──────────
-        
-
-# keep_vba=True → não quebra templates com VML/validações
-        wb = load_workbook(tpl_path, keep_vba=True)
-
-        if sheet_name not in wb.sheetnames:
+        if not filename.lower().endswith(".xlsx"):
             return JSONResponse(
-                {"error": f"Aba '{sheet_name}' não encontrada"},
+                {"error": "Envie um arquivo .xlsx."},
                 status_code=400
             )
 
-        ws          = wb[sheet_name]
-        photo_cols  = find_photo_columns(ws, header_row)
-        col_by_name = {c['name']: c['col'] for c in photo_cols}
-        assign      = json.loads(assignments)
-        first_row   = header_row + 1
+        content = await template.read()
+        wb = load_workbook(io.BytesIO(content))
 
-        print(f"[DEBUG] col_by_name: {col_by_name}")
-        print(f"[DEBUG] assignments: {assign}")
+        sheets = wb.sheetnames
 
-        for col_name, filenames in assign.items():
-            col_num = col_by_name.get(col_name)
-            if col_num is None:
-                print(f"[WARN] Coluna não encontrada: {col_name}")
-                continue
+        if not sheets:
+            return JSONResponse(
+                {"error": "O arquivo Excel não possui abas."},
+                status_code=400
+            )
 
-            for row_offset, fname in enumerate(filenames):
-                img_path = img_map.get(fname)
-                if not img_path or not os.path.exists(img_path):
-                    print(f"[WARN] Imagem não encontrada: {fname}")
-                    continue
+        if sheet_name and sheet_name in sheets:
+            selected_sheet = sheet_name
+        else:
+            selected_sheet = wb.active.title
 
-                row_num = first_row + row_offset
+        ws = wb[selected_sheet]
 
-                
+        header_row = safe_int(header_row, 1)
 
-# Redimensionar mantendo proporção
-                pil = PILImage.open(img_path)
-                pil.thumbnail((300, 200), PILImage.LANCZOS)
-                resized = os.path.join(tmp, f"r_{uuid.uuid4().hex}.jpg")
-                pil.convert("RGB").save(resized, "JPEG", quality=90)
+        if header_row < 1:
+            header_row = 1
 
-                
+        detection = detect_photo_columns(ws, header_row)
 
-# Altura da linha
-                _, h_px = pil.size
-                ws.row_dimensions[row_num].height = max(h_px * 0.75 + 4, 20)
+        return {
+            "sheets": sheets,
+            "selected_sheet": selected_sheet,
+            "header_row": header_row,
+            "mode": detection["mode"],
+            "message": detection["message"],
+            "last_named_col": detection["last_named_col"],
+            "photo_columns": detection["columns"]
+        }
 
-                
+    except Exception as e:
+        return JSONResponse(
+            {"error": f"Erro ao ler template: {str(e)}"},
+            status_code=500
+        )
 
-# Inserir imagem na célula
-                cell_ref      = ws.cell(row=row_num, column=col_num).coordinate
-                xl_img        = XLImage(resized)
-                xl_img.anchor = cell_ref
-                ws.add_image(xl_img)
 
-                print(f"[DEBUG] ✅ {fname} → {col_name} linha {row_num} ({cell_ref})")
+@app.post("/api/exportar")
+async def exportar(
+    template: UploadFile = File(...),
+    sheet_name: str = Form(...),
+    header_row: int = Form(1),
+    photo_columns: str = Form("[]"),
+    assignments: str = Form("[]"),
+    write_headers: str = Form("true"),
+    img_width: int = Form(130),
+    img_height: int = Form(95)
+):
+    """
+    Exporta o Excel inserindo as fotos nas células escolhidas.
+
+    assignments esperado:
+    [
+      {
+        "name": "foto1.jpg",
+        "image": "data:image/jpeg;base64,...",
+        "col": 15,
+        "row": 2
+      }
+    ]
+    """
+
+    output_path = None
+
+    try:
+        filename = template.filename or ""
+
+        if not filename.lower().endswith(".xlsx"):
+            return JSONResponse(
+                {"error": "Envie um arquivo .xlsx."},
+                status_code=400
+            )
+
+        header_row = safe_int(header_row, 1)
+        img_width = safe_int(img_width, 130)
+        img_height = safe_int(img_height, 95)
+
+        if img_width < 20:
+            img_width = 130
+
+        if img_height < 20:
+            img_height = 95
+
+        try:
+            photo_columns_data = json.loads(photo_columns)
+        except Exception:
+            return JSONResponse(
+                {"error": "JSON inválido em photo_columns."},
+                status_code=400
+            )
+
+        try:
+            assignments_data = json.loads(assignments)
+        except Exception:
+            return JSONResponse(
+                {"error": "JSON inválido em assignments."},
+                status_code=400
+            )
+
+        if not isinstance(assignments_data, list) or len(assignments_data) == 0:
+            return JSONResponse(
+                {"error": "Nenhuma imagem foi enviada para exportação."},
+                status_code=400
+            )
+
+        content = await template.read()
+        wb = load_workbook(io.BytesIO(content))
+
+        if sheet_name not in wb.sheetnames:
+            return JSONResponse(
+                {"error": f"A aba '{sheet_name}' não foi encontrada no Excel."},
+                status_code=400
+            )
+
+        ws = wb[sheet_name]
 
         
 
-# ── Salvar resultado ──────────────────────────────
+# Se solicitado, escreve Foto_1, Foto_2 etc. nas colunas vazias
+        if str_to_bool(write_headers) and isinstance(photo_columns_data, list):
+            previous_header_cell = ws.cell(row=header_row, column=max(1, ws.max_column))
+
+            for col_info in photo_columns_data:
+                col_idx = safe_int(col_info.get("col"), 0)
+                name = str(col_info.get("name") or "").strip()
+
+                if col_idx <= 0 or not name:
+                    continue
+
+                target_cell = ws.cell(row=header_row, column=col_idx)
+                current_value = target_cell.value
+
+                if current_value is None or str(current_value).strip() == "" or is_foto_header(current_value):
+                    target_cell.value = name
+
+                    
+
+# Copia estilo da célula anterior quando possível
+                    if col_idx > 1:
+                        source_cell = ws.cell(row=header_row, column=col_idx - 1)
+                        copy_cell_style(source_cell, target_cell)
+
+        image_buffers = []
+        used_cells = set()
+        warnings = []
+
+        for idx, item in enumerate(assignments_data, start=1):
+            image_data = item.get("image")
+            target_row = safe_int(item.get("row"), header_row + 1)
+            target_col = safe_int(item.get("col"), 0)
+
+            if target_row <= header_row:
+                target_row = header_row + 1
+
+            if target_col <= 0:
+                warnings.append(f"Imagem {idx} ignorada: coluna inválida.")
+                continue
+
+            cell_ref = f"{get_column_letter(target_col)}{target_row}"
+
+            if cell_ref in used_cells:
+                warnings.append(
+                    f"A célula {cell_ref} recebeu mais de uma imagem. "
+                    f"As imagens podem ficar sobrepostas."
+                )
+
+            used_cells.add(cell_ref)
+
+            try:
+                image_bytes = decode_data_url(image_data)
+                img_buffer, final_w, final_h = prepare_image(
+                    image_bytes=image_bytes,
+                    max_width=img_width,
+                    max_height=img_height,
+                    quality=88
+                )
+            except Exception as e:
+                warnings.append(f"Imagem {idx} ignorada por erro de leitura: {str(e)}")
+                continue
+
+            xl_image = XLImage(img_buffer)
+            xl_image.width = final_w
+            xl_image.height = final_h
+            xl_image.anchor = cell_ref
+
+            ws.add_image(xl_image)
+
+            image_buffers.append(img_buffer)
+
+            col_letter = get_column_letter(target_col)
+
+            
+
+# Ajuste de largura da coluna.
+            
+
+# openpyxl mede largura em unidade aproximada de caracteres.
+            desired_col_width = max(12, img_width / 7.0)
+
+            current_width = ws.column_dimensions[col_letter].width
+            if current_width is None or current_width < desired_col_width:
+                ws.column_dimensions[col_letter].width = desired_col_width
+
+            
+
+# Ajuste de altura da linha.
+            
+
+# Excel mede altura em pontos. Aproximação: 1 px = 0.75 pt.
+            desired_row_height = max(35, img_height * 0.75)
+
+            current_height = ws.row_dimensions[target_row].height
+            if current_height is None or current_height < desired_row_height:
+                ws.row_dimensions[target_row].height = desired_row_height
+
+        if len(used_cells) == 0:
+            return JSONResponse(
+                {"error": "Nenhuma imagem válida foi inserida no Excel."},
+                status_code=400
+            )
+
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
+        output_path = tmp.name
+        tmp.close()
+
         wb.save(output_path)
-        print(f"[DEBUG] Salvo: {output_path}")
+
+        def cleanup_file(path: str):
+            try:
+                if path and os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
 
         return FileResponse(
-            output_path,
-            filename="template_com_fotos.xlsx",
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            path=output_path,
+            filename="resultado_fotos.xlsx",
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            background=BackgroundTask(cleanup_file, output_path)
         )
 
     except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        print(f"[ERRO]\n{tb}")
-        return JSONResponse({"error": str(e), "trace": tb}, status_code=500)
+        if output_path and os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except Exception:
+                pass
 
-    finally:
-        
-
-# Limpar arquivos temporários após 60s
-        import threading
-        def cleanup():
-            import time
-            time.sleep(60)
-            shutil.rmtree(tmp, ignore_errors=True)
-        threading.Thread(target=cleanup, daemon=True).start()
+        return JSONResponse(
+            {"error": f"Erro ao exportar Excel: {str(e)}"},
+            status_code=500
+        )
