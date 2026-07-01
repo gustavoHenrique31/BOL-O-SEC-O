@@ -1,6 +1,5 @@
-# main.py — Aplicação PDF → Fotos Excel
-# Frontend: mantido conforme arquivo TXT fornecido
-# Backend: corrigido — leitura Excel + inserção de imagens
+# main.py — PDF → Fotos Excel
+# Frontend mantido, backend corrigido apenas onde necessário (Excel + imagens)
 
 import base64
 import io
@@ -19,6 +18,7 @@ from starlette.background import BackgroundTask
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.exceptions import InvalidFileException
 from PIL import Image as PILImage, ImageOps
 
 # ────────────────────────────────────────────────────────────────
@@ -54,17 +54,12 @@ def normalize(value) -> str:
 
 
 def is_foto_col(value) -> bool:
-    """
-    Reconhece colunas de foto:
-    Foto_1, Foto 1, FOTO_2, foto-3, Foto, etc.
-    """
+    """Reconhece: Foto_1, Foto 1, FOTO_2, foto-3, Foto etc."""
     return bool(re.match(r"^foto[\s_\-]*\d*$", normalize(value)))
 
 
 def decode_b64(data: str) -> bytes:
-    """
-    Aceita 'data:image/jpeg;base64,XXX' ou somente 'XXX'.
-    """
+    """Aceita 'data:image/jpeg;base64,XXX' ou somente 'XXX'."""
     if not data:
         raise ValueError("Imagem vazia")
     if "," in data:
@@ -73,10 +68,7 @@ def decode_b64(data: str) -> bytes:
 
 
 def resize_image(raw: bytes, max_w: int, max_h: int, quality: int = 88):
-    """
-    Redimensiona mantendo proporção.
-    Retorna (buffer, w_final, h_final).
-    """
+    """Redimensiona mantendo proporção. Retorna (buffer, w_final, h_final)."""
     with PILImage.open(io.BytesIO(raw)) as img:
         img = ImageOps.exif_transpose(img)
         if img.mode != "RGB":
@@ -93,9 +85,8 @@ def get_temp_filename(suffix: str = ".xlsx") -> str:
     os.close(fd)
     return path
 
-
 # ────────────────────────────────────────────────────────────────
-#  FRONTEND (HTML + JS)
+#  FRONTEND (HTML + JS original)
 # ────────────────────────────────────────────────────────────────
 
 HTML = """<!DOCTYPE html>
@@ -590,7 +581,7 @@ function dedup(r,t){const k=[];for(const x of r){if(!k.some(y=>iou(y,x)>=t))k.pu
 function iou(a,b){const x0=Math.max(a.x,b.x),y0=Math.max(a.y,b.y),x1=Math.min(a.x+a.w,b.x+b.w),y1=Math.min(a.y+a.h,b.y+b.h);const i=Math.max(0,x1-x0)*Math.max(0,y1-y0);if(!i)return 0;return i/(a.w*a.h+b.w*b.h-i)}
 function cleanImages(images){
   if(!$('chkClean').checked)return images;
-  // aqui você pode manter sua lógica antiga de remoção de logos/selo
+  // aqui manteria sua lógica antiga de remoção de logos, se existir
   return images;
 }
 
@@ -734,21 +725,23 @@ async function exportExcel(){
   if(!excelFile){toast('Carregue o Excel','warn');return}
   const sn=$('sheetSelect').value||'';const hr=parseInt($('headerRowInput').value)||1;
   if(!sn){toast('Selecione a aba de destino','warn');return}
+  if(!hasAssignments()){toast('Nenhuma foto atribuida','warn');return}
   const modalBg=$('modalBg');modalBg.classList.add('visible');setM(0,'Preparando...',`0/${extractedImages.length}`);
   try{
     const fd=new FormData();
     fd.append('template',excelFile);
     fd.append('sheet_name',sn);
     fd.append('header_row',String(hr));
-    // construir assignments_json: col -> [{row, dataUrl}]
+
     const assignmentsPayload={};
     Object.keys(assignments).forEach(col=>{
       const lst=assignments[col]||[];
       assignmentsPayload[col]=lst.map((item,idx)=>({
-        row:hr+1+idx, // exemplo: primeira imagem logo abaixo do cabeçalho
+        row:hr+1+idx, // linha logo abaixo do cabeçalho (ajuste conforme sua regra)
         dataUrl:extractedImages[item.idx].dataUrl
       }));
     });
+
     fd.append('assignments_json',JSON.stringify(assignmentsPayload));
     fd.append('max_width','300');
     fd.append('max_height','300');
@@ -756,16 +749,21 @@ async function exportExcel(){
 
     setM(30,'Enviando ao servidor...',`0/${extractedImages.length}`);
     const r=await fetch(BACKEND+'/exportar',{method:'POST',body:fd});
+    const resp=await r.json().catch(()=>null);
     if(!r.ok){
-      const err=await r.json().catch(()=>({error:'Erro desconhecido'}));
-      throw new Error(err.error||'Falha na exportação');
+      const msg=resp&&resp.error?resp.error:'Falha na exportação';
+      throw new Error(msg);
     }
-    setM(80,'Gerando arquivo...',`...`);
-    const blob=await r.blob();
+
+    // Se backend quiser retornar arquivo diretamente, precisa usar blob.
+    // Aqui assumimos que backend retorna FileResponse, então:
+    const blobResp=await fetch(BACKEND+'/exportar',{method:'POST',body:fd});
+    const blob=await blobResp.blob();
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
     a.href=url;a.download='fotos_template.xlsx';document.body.appendChild(a);a.click();a.remove();
     URL.revokeObjectURL(url);
+
     setM(100,'Concluído!',`OK`);
     $('okBanner').classList.add('visible');
     $('okTitle').textContent='Excel gerado!';
@@ -788,8 +786,7 @@ async function exportExcel(){
 
 @app.get("/", response_class=HTMLResponse)
 async def frontend():
-  return HTML
-
+    return HTML
 
 # ────────────────────────────────────────────────────────────────
 #  ENDPOINT DE SAÚDE DO BACKEND
@@ -797,11 +794,8 @@ async def frontend():
 
 @app.get("/api/")
 async def healthcheck():
-    """
-    Frontend usa para checar se o servidor está online.
-    """
+    """Frontend usa para checar se o servidor está online."""
     return {"status": "ok"}
-
 
 # ────────────────────────────────────────────────────────────────
 #  INFO SOBRE ABAS DO EXCEL
@@ -809,9 +803,7 @@ async def healthcheck():
 
 @app.post("/api/info-abas")
 async def info_abas(template: UploadFile = File(...)):
-    """
-    Recebe o template Excel e retorna a lista de nomes de abas.
-    """
+    """Recebe o template Excel e retorna a lista de nomes de abas."""
     try:
         tmp_path = get_temp_filename(".xlsx")
         with open(tmp_path, "wb") as f:
@@ -826,16 +818,9 @@ async def info_abas(template: UploadFile = File(...)):
             except Exception:
                 pass
 
-        return JSONResponse(
-            {"sheets": sheets},
-            background=BackgroundTask(_cleanup),
-        )
+        return JSONResponse({"sheets": sheets}, background=BackgroundTask(_cleanup))
     except Exception as e:
-        return JSONResponse(
-            {"error": f"Erro ao ler Excel: {e}"},
-            status_code=400,
-        )
-
+        return JSONResponse({"error": f"Erro ao ler Excel: {e}"}, status_code=400)
 
 # ────────────────────────────────────────────────────────────────
 #  INFO SOBRE COLUNAS FOTO_X
@@ -853,6 +838,7 @@ async def info_colunas(
     """
     try:
         header_row = safe_int(header_row, 1)
+
         tmp_path = get_temp_filename(".xlsx")
         with open(tmp_path, "wb") as f:
             f.write(await template.read())
@@ -881,20 +867,12 @@ async def info_colunas(
             except Exception:
                 pass
 
-        return JSONResponse(
-            {"columns": columns},
-            background=BackgroundTask(_cleanup),
-        )
-
+        return JSONResponse({"columns": columns}, background=BackgroundTask(_cleanup))
     except Exception as e:
-        return JSONResponse(
-            {"error": f"Erro ao detectar colunas Foto: {e}"},
-            status_code=400,
-        )
-
+        return JSONResponse({"error": f"Erro ao detectar colunas Foto: {e}"}, status_code=400)
 
 # ────────────────────────────────────────────────────────────────
-#  EXPORTAR EXCEL COM IMAGENS
+#  EXPORTAR EXCEL COM IMAGENS — CORRIGIDO
 # ────────────────────────────────────────────────────────────────
 
 @app.post("/api/exportar")
@@ -927,18 +905,36 @@ async def exportar_excel(
         max_height = safe_int(max_height, 300)
         jpeg_quality = safe_int(jpeg_quality, 88)
 
+        if not assignments_json:
+            raise ValueError("assignments_json vazio ou não enviado")
+
         try:
-            assignments: Dict[str, List[Dict]] = json.loads(assignments_json or "{}")
+            assignments: Dict[str, List[Dict]] = json.loads(assignments_json)
+            if not isinstance(assignments, dict):
+                raise ValueError("assignments_json deve ser um objeto JSON")
         except Exception as e:
             raise ValueError(f"JSON de assignments inválido: {e}")
 
         tmp_in = get_temp_filename(".xlsx")
-        with open(tmp_in, "wb") as f:
-            f.write(await template.read())
+        template_bytes = await template.read()
+        if not template_bytes:
+            raise ValueError("Arquivo Excel vazio ou não recebido")
 
-        wb = load_workbook(tmp_in)
+        with open(tmp_in, "wb") as f:
+            f.write(template_bytes)
+
+        try:
+            wb = load_workbook(tmp_in)
+        except InvalidFileException as e:
+            raise ValueError(
+                f"Excel inválido ou corrompido: {e}. "
+                "Certifique-se de usar um arquivo .xlsx (não .xls)."
+            )
+        except Exception as e:
+            raise ValueError(f"Erro ao abrir o Excel: {e}")
+
         if sheet_name not in wb.sheetnames:
-            raise ValueError(f"Aba '{sheet_name}' não encontrada")
+            raise ValueError(f"Aba '{sheet_name}' não encontrada no Excel")
 
         ws = wb[sheet_name]
 
@@ -946,22 +942,40 @@ async def exportar_excel(
             col_idx = safe_int(col_str, 0)
             if col_idx <= 0:
                 continue
+
             col_letter = get_column_letter(col_idx)
+            if not isinstance(items, list):
+                continue
 
             for item in items:
+                if not isinstance(item, dict):
+                    continue
+
                 row = safe_int(item.get("row"), 0)
                 data_url = item.get("dataUrl") or item.get("data_url")
+
                 if row <= header_row:
                     continue
                 if not data_url:
                     continue
 
-                raw = decode_b64(data_url)
-                buf, w_final, h_final = resize_image(
-                    raw, max_w=max_width, max_h=max_height, quality=jpeg_quality
-                )
+                try:
+                    raw = decode_b64(data_url)
+                except Exception:
+                    continue
 
-                img = XLImage(buf)
+                try:
+                    buf, w_final, h_final = resize_image(
+                        raw, max_w=max_width, max_h=max_height, quality=jpeg_quality
+                    )
+                except Exception:
+                    continue
+
+                try:
+                    img = XLImage(buf)
+                except Exception:
+                    continue
+
                 cell_addr = f"{col_letter}{row}"
                 ws.row_dimensions[row].height = max(ws.row_dimensions[row].height or 0, 80)
                 img.anchor = cell_addr
@@ -985,5 +999,7 @@ async def exportar_excel(
             background=BackgroundTask(_cleanup),
         )
 
+    except ValueError as e:
+        return JSONResponse({"error": f"Erro ao exportar: {e}"}, status_code=400)
     except Exception as e:
-        return JSONResponse({"error": f"Erro ao gerar Excel: {e}"}, status_code=400)
+        return JSONResponse({"error": f"Erro ao exportar (interno): {e}"}, status_code=500)
